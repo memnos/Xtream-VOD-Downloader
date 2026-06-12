@@ -32,7 +32,7 @@ Additional capabilities:
 ### 1. Clone
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/xtream-emby-downloader.git
+git clone https://github.com/memnos/xtream-emby-downloader.git
 cd xtream-emby-downloader
 ```
 

@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
-# Run from the project root after: gh auth login
-set -euo pipefail
-
+set -eu
+GH="${GH_BIN:-gh}"
 REPO_NAME="${1:-xtream-emby-downloader}"
-
-gh repo create "$REPO_NAME" \
+"$GH" repo create "$REPO_NAME" \
   --public \
   --description "Streamlit + yt-dlp downloader for Xtream VOD with Emby auto-download watcher (EN/IT)" \
   --source=. \
   --remote=origin \
   --push
-
-echo "Done: https://github.com/$(gh api user -q .login)/${REPO_NAME}"
+echo "Done: https://github.com/$("$GH" api user -q .login)/${REPO_NAME}"
