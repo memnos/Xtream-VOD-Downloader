@@ -31,7 +31,22 @@ RUN set -eux; \
 
 COPY app.py core.py i18n.py emby_watcher.py deletion.py watcher_daemon.py ./
 
-RUN mkdir -p /app/.streamlit && printf '%s\n' \
+RUN printf '%s\n' \
+    '#!/bin/sh' \
+    'set -eu' \
+    'PUID="${PUID:-1000}"' \
+    'PGID="${PGID:-1000}"' \
+    'if [ "$(id -u)" = "0" ]; then' \
+    '  mkdir -p /app/.data /download/movies /download/tv /download/tv-2' \
+    '  chown -R "${PUID}:${PGID}" /app/.data /download/movies /download/tv /download/tv-2 2>/dev/null || true' \
+    '  find /download -type d -exec chmod 777 {} + 2>/dev/null || true' \
+    '  find /download -type f -exec chmod 664 {} + 2>/dev/null || true' \
+    'fi' \
+    'python /app/watcher_daemon.py &' \
+    'exec streamlit run /app/app.py --server.port=8501 --server.address=0.0.0.0 --server.fileWatcherType=none --browser.gatherUsageStats=false' \
+    > /app/entrypoint.sh \
+    && chmod +x /app/entrypoint.sh \
+    && mkdir -p /app/.streamlit && printf '%s\n' \
     '[server]' \
     'fileWatcherType = "none"' \
     'headless = true' \
@@ -45,4 +60,4 @@ RUN mkdir -p /app/.streamlit && printf '%s\n' \
 
 EXPOSE 8501
 
-CMD ["sh", "-c", "python /app/watcher_daemon.py & exec streamlit run /app/app.py --server.port=8501 --server.address=0.0.0.0 --server.fileWatcherType=none --browser.gatherUsageStats=false"]
+ENTRYPOINT ["/app/entrypoint.sh"]

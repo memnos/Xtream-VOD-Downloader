@@ -47,6 +47,12 @@ DOWNLOAD_HISTORY_FILE = os.environ.get(
 )
 MAX_DOWNLOAD_HISTORY = 20
 DIR_MODE = 0o777
+FILE_MODE = 0o664
+DOWNLOAD_ROOTS = (
+    DOWNLOAD_MOVIES_PATH,
+    DOWNLOAD_TV_PATH,
+    DOWNLOAD_TV2_PATH,
+)
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts", ".webm"}
 
 
@@ -104,43 +110,80 @@ def owner_ids() -> tuple[int, int]:
     )
 
 
-def set_owner(path: str, recursive: bool = True) -> None:
-    if not os.path.exists(path):
+def _is_under_download_roots(path: str) -> bool:
+    real = os.path.realpath(path)
+    return any(real == root or real.startswith(root + os.sep) for root in DOWNLOAD_ROOTS)
+
+
+def _apply_path_permissions(path: str, uid: int, gid: int) -> None:
+    try:
+        if os.geteuid() == 0:
+            os.chown(path, uid, gid)
+        if os.path.isdir(path):
+            os.chmod(path, DIR_MODE)
+        else:
+            os.chmod(path, FILE_MODE)
+    except OSError:
+        pass
+
+
+def finalize_download_path(path: str, fix_children: bool = False) -> None:
+    """Set owner (PUID/PGID) and modes on a file/dir and its parents under /download."""
+    if not path or not os.path.exists(path):
         return
     uid, gid = owner_ids()
-    try:
-        if recursive and os.path.isdir(path):
-            for root, dirs, files in os.walk(path):
-                os.chown(root, uid, gid)
-                for name in dirs:
-                    os.chown(os.path.join(root, name), uid, gid)
-                for name in files:
-                    os.chown(os.path.join(root, name), uid, gid)
-        else:
-            os.chown(path, uid, gid)
-    except (PermissionError, OSError):
-        pass
+    chain: list[str] = []
+    current = os.path.realpath(path)
+    chain.append(current)
+    parent = os.path.dirname(current)
+    while parent and _is_under_download_roots(parent):
+        chain.append(parent)
+        if parent in DOWNLOAD_ROOTS:
+            break
+        parent = os.path.dirname(parent)
+    for target in chain:
+        _apply_path_permissions(target, uid, gid)
+    if fix_children and os.path.isdir(path):
+        for root, dirs, files in os.walk(path):
+            for name in dirs + files:
+                _apply_path_permissions(os.path.join(root, name), uid, gid)
+
+
+def ensure_download_tree_permissions() -> None:
+    """On startup (as root), fix ownership of existing downloads and .data."""
+    uid, gid = owner_ids()
+    roots = list(DOWNLOAD_ROOTS) + [DATA_DIR]
+    for base in roots:
+        os.makedirs(base, mode=DIR_MODE, exist_ok=True)
+        for root, dirs, files in os.walk(base):
+            for name in [root, *dirs, *files]:
+                full = name if name == root else os.path.join(root, name)
+                _apply_path_permissions(full, uid, gid)
+
+
+def set_owner(path: str, recursive: bool = True) -> None:
+    finalize_download_path(path, fix_children=recursive)
 
 
 def set_dir_mode(path: str, recursive: bool = True) -> None:
     if not os.path.isdir(path):
         return
+    uid, gid = owner_ids()
     try:
         if recursive:
-            for root, dirs, _files in os.walk(path):
-                os.chmod(root, DIR_MODE)
-                for name in dirs:
-                    os.chmod(os.path.join(root, name), DIR_MODE)
+            for root, dirs, files in os.walk(path):
+                _apply_path_permissions(root, uid, gid)
+                for name in dirs + files:
+                    _apply_path_permissions(os.path.join(root, name), uid, gid)
         else:
-            os.chmod(path, DIR_MODE)
-    except (PermissionError, OSError):
+            _apply_path_permissions(path, uid, gid)
+    except OSError:
         pass
 
 
 def prepare_output_dir(path: str) -> None:
     os.makedirs(path, mode=DIR_MODE, exist_ok=True)
-    set_owner(path, recursive=True)
-    set_dir_mode(path, recursive=True)
+    finalize_download_path(path)
 
 
 def _ensure_data_dir() -> None:
@@ -582,16 +625,13 @@ def run_ytdlp(
             if progress_callback is not None:
                 progress_callback(min(last_pct / 100.0, 1.0), f"{prefix}{last_pct:.1f}%")
 
-    proc.wait()
-    if proc.returncode != 0:
-        raise RuntimeError("\n".join(output_lines[-15:]) or "Download fallito")
-
-    if os.path.exists(output_path):
-        set_owner(output_path, recursive=False)
-    parent = os.path.dirname(output_path)
-    if parent:
-        set_owner(parent, recursive=True)
-        set_dir_mode(parent, recursive=True)
+    try:
+        proc.wait()
+        if proc.returncode != 0:
+            raise RuntimeError("\n".join(output_lines[-15:]) or "Download fallito")
+    finally:
+        if output_path and os.path.exists(output_path):
+            finalize_download_path(output_path)
 
     if progress_callback is not None:
         progress_callback(1.0, f"{prefix}100% — Completato")

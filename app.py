@@ -15,6 +15,7 @@ from core import (
     exclude_hidden_items,
     hidden_category_ids,
     live_cooldown_remaining,
+    ensure_download_tree_permissions,
     load_auto_download_config,
     load_credentials,
     load_hidden_categories,
@@ -42,7 +43,7 @@ from i18n import (
     translate_history_type,
 )
 
-APP_VERSION = "2.11.0"
+APP_VERSION = "2.12.0"
 PENDING_DOWNLOAD_KEY = "pending_download_job"
 
 SERIES_DEST_OPTIONS = [
@@ -66,6 +67,8 @@ def series_dest_index(path: str) -> int:
             return idx
     return 0
 
+
+ensure_download_tree_permissions()
 
 st.set_page_config(page_title=t("page_title"), layout="wide", page_icon="📺")
 render_lang_selector()

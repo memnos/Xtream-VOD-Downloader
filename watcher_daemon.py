@@ -1,9 +1,11 @@
 import time
 
+from core import ensure_download_tree_permissions
 from emby_watcher import get_watcher
 
 
 def main() -> None:
+    ensure_download_tree_permissions()
     watcher = get_watcher()
     while True:
         try:
