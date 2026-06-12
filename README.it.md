@@ -102,6 +102,14 @@ Richiede **ffmpeg** e **yt-dlp** nel `PATH`.
 
 ---
 
+## Supporto
+
+Se questo progetto ti è utile, puoi offrirmi una birra:
+
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-supporto-yellow?logo=buy-me-a-coffee&logoColor=white)](https://buymeacoffee.com/memnos)
+
+---
+
 ## Licenza
 
 MIT — vedi [LICENSE](LICENSE).

@@ -144,6 +144,14 @@ See `.env.example` for Docker volume paths.
 
 ---
 
+## Support
+
+If this project saves you time, you can buy me a beer:
+
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-yellow?logo=buy-me-a-coffee&logoColor=white)](https://buymeacoffee.com/memnos)
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

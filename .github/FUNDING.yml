@@ -1,0 +1,11 @@
+# Shows the "Sponsor" button on the GitHub repo page.
+# 1. Create a page at https://www.buymeacoffee.com/
+# 2. Replace YOUR_USERNAME below with your BMC username (from the URL buymeacoffee.com/YOUR_USERNAME)
+# 3. Commit and push this file
+
+buy_me_a_coffee: memnos
+
+# Other options (uncomment if you use them):
+# github: [memnos]          # GitHub Sponsors — https://github.com/sponsors
+# ko_fi: YOUR_USERNAME      # https://ko-fi.com
+# custom: ["https://paypal.me/YOUR_USERNAME"]
