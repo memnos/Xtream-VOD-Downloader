@@ -1,8 +1,8 @@
-# Xtream VOD Downloader for Emby
+# Xtream VOD Downloader for Emby / Jellyfin
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Web UI and background watcher to download movies and TV episodes from an **Xtream Codes** provider, with optional **Emby** integration for hands-free episode fetching after playback.
+Web UI and background watcher to download movies and TV episodes from an **Xtream Codes** provider, with optional **Emby** and/or **Jellyfin** integration for hands-free episode fetching after playback.
 
 **Languages:** English · [Italiano](README.it.md) (switch anytime in the sidebar)
 
@@ -13,10 +13,13 @@ Web UI and background watcher to download movies and TV episodes from an **Xtrea
 | Mode | Description |
 |------|-------------|
 | **Manual** | Browse Xtream VOD/series catalog, search, pick titles, download with progress bar |
-| **Automatic** | Watches Emby playback; queues subsequent `.strm` episodes; pauses download while you stream from the same Xtream host |
+| **Automatic** | Watches Emby and/or Jellyfin playback; queues subsequent `.strm` episodes; pauses download while you stream from the same Xtream host |
 
 Additional capabilities:
 
+- **Dual media server support** — monitor Emby, Jellyfin, or both at the same time
+- **Traffic-light status** — see at a glance which servers are actively monitored (🟢/🔴)
+- **Connection test** — verify Emby/Jellyfin URL, API key, and username before saving
 - Download progress bar (manual and automatic modes)
 - Live watcher dashboard (playback, queue, cooldown, logs)
 - Recent playback & download history
@@ -56,10 +59,30 @@ Open **http://localhost:8501**
 ### 4. First-time setup in the UI
 
 1. Enter **Xtream** host, username, and password in the sidebar.
-2. For automatic mode: open **Automatic download**, set Emby URL/API key/username, enable the watcher, save.
+2. Select **Automatic** mode in the sidebar.
+3. Open **Automatic download**:
+   - Enable **automatic download**
+   - Under **Emby** and/or **Jellyfin**: check **Monitor**, fill URL / API key / username
+   - Use **🔌 Test Emby** / **🔌 Test Jellyfin** to verify connectivity
+   - Save settings
 
-> **Emby on the same machine:** `network_mode: host` in `docker-compose.yml` lets the container use `http://localhost:8096`.  
-> **Emby on another PC:** use its LAN IP, e.g. `http://192.168.1.10:8096`.
+The **Monitored servers** panel shows green (🟢) when a server is enabled, configured, the watcher is running, and automatic download is on. Red (🔴) means that server is not being monitored.
+
+> **Media server on the same machine:** `network_mode: host` in `docker-compose.yml` lets the container use `http://localhost:8096`.  
+> **Media server on another PC:** use its LAN IP, e.g. `http://192.168.1.10:8096`.  
+> Emby and Jellyfin often use different ports — set each URL accordingly.
+
+### Upgrading from older versions
+
+Configs with the legacy single `media_server` field are migrated automatically on load. If you previously used Jellyfin only, credentials move to the Jellyfin section; Emby-only setups keep Emby enabled.
+
+After pulling new code, rebuild the container:
+
+```bash
+docker compose up -d --build
+```
+
+Hard-refresh the browser (Ctrl+F5) and check the sidebar build number.
 
 ---
 
@@ -69,7 +92,7 @@ Open **http://localhost:8501**
 ├── app.py              # Streamlit UI
 ├── i18n.py             # English / Italian strings
 ├── core.py             # Xtream API, yt-dlp, paths, config
-├── emby_watcher.py     # Emby session watcher & download queue
+├── emby_watcher.py     # Emby/Jellyfin session watcher & download queue
 ├── watcher_daemon.py   # Background watcher process
 ├── deletion.py         # Series completion cleanup prompts
 ├── docker-compose.yml
@@ -83,7 +106,7 @@ Open **http://localhost:8501**
 | File | Purpose |
 |------|---------|
 | `.data/xtream_credentials.json` | Xtream login (optional “remember”) |
-| `.data/auto_download.json` | Emby watcher settings |
+| `.data/auto_download.json` | Watcher settings (Emby + Jellyfin) |
 | `.data/watcher_status.json` | Live watcher state for the UI |
 | `.data/playback_history.json` | Last 10 played items |
 | `.data/download_history.json` | Last 20 completed downloads |
@@ -94,12 +117,14 @@ Copy `config/examples/auto_download.json.example` to `.data/auto_download.json` 
 
 ## Automatic download behaviour
 
-1. Polls Emby sessions for the configured user.
-2. When an episode ends, finds later episodes in the Emby library that are `.strm` files.
+1. Polls active sessions on every **enabled** media server (Emby and/or Jellyfin).
+2. When an episode ends, finds later episodes in the library that are `.strm` files.
 3. Matches Xtream URLs (from `.strm` content or catalog name).
 4. Downloads one episode at a time to `/download/tv` (or second TV path).
 5. Waits a cooldown (default 90s) after each episode unless download was paused for playback.
 6. Pauses active yt-dlp download if you play a `.strm` from the same Xtream domain.
+
+If both servers are enabled, playback on either triggers downloads. A failure on one server does not stop monitoring on the other.
 
 ---
 
@@ -129,8 +154,11 @@ Requires **ffmpeg** and **yt-dlp** on `PATH`.
 | `DATA_DIR` | `/app/.data` | Config and state directory |
 | `PUID` / `PGID` | `1000` | File ownership for downloads |
 | `EMBY_URL` | — | Optional default Emby URL |
-| `EMBY_API_KEY` | — | Optional default API key |
+| `EMBY_API_KEY` | — | Optional default Emby API key |
 | `EMBY_USERNAME` | — | Optional default Emby user |
+| `JELLYFIN_URL` | — | Optional default Jellyfin URL |
+| `JELLYFIN_API_KEY` | — | Optional default Jellyfin API key |
+| `JELLYFIN_USERNAME` | — | Optional default Jellyfin user |
 
 See `.env.example` for Docker volume paths.
 

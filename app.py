@@ -36,6 +36,7 @@ from deletion import (
     load_deletion_prompts,
     remove_deletion_prompt,
 )
+from emby_watcher import MediaServerClient
 from i18n import (
     render_lang_selector,
     t,
@@ -43,7 +44,7 @@ from i18n import (
     translate_history_type,
 )
 
-APP_VERSION = "2.12.0"
+APP_VERSION = "2.14.3"
 PENDING_DOWNLOAD_KEY = "pending_download_job"
 
 SERIES_DEST_OPTIONS = [
@@ -400,10 +401,77 @@ def render_download_history_section() -> None:
         st.markdown("\n".join(rows))
 
 
+def test_media_server_connection(server: str, url: str, api_key: str, username: str) -> tuple[bool, str]:
+    url = url.strip()
+    api_key = api_key.strip()
+    username = username.strip()
+    if not url or not api_key or not username:
+        return False, t("server_test_missing_fields")
+    client = MediaServerClient(url, api_key, server)
+    return client.test_connection(username)
+
+
+def show_media_server_test_result(server: str, ok: bool, detail: str) -> None:
+    label = t("emby_section") if server == "emby" else t("jellyfin_section")
+    if ok:
+        st.success(t("server_test_ok", server=label, detail=detail))
+    else:
+        st.error(t("server_test_fail", server=label, detail=detail))
+
+
+def is_server_monitored(config: dict, server: str, watcher_running: bool) -> bool:
+    if not config.get("enabled") or not watcher_running:
+        return False
+    if not config.get(f"{server}_enabled"):
+        return False
+    url = str(config.get(f"{server}_url", "")).strip()
+    api_key = str(config.get(f"{server}_api_key", "")).strip()
+    username = str(config.get(f"{server}_username", "")).strip()
+    return bool(url and api_key and username)
+
+
+def render_server_traffic_lights(config: dict, watcher_running: bool, *, compact: bool = False) -> None:
+    servers = (
+        ("emby", "emby_section"),
+        ("jellyfin", "jellyfin_section"),
+    )
+    if compact:
+        lines = []
+        for server, label_key in servers:
+            active = is_server_monitored(config, server, watcher_running)
+            light = "🟢" if active else "🔴"
+            status_label = t("server_monitor_on") if active else t("server_monitor_off")
+            lines.append(f"{light} {t(label_key)}: {status_label}")
+        st.sidebar.markdown("**" + t("server_monitor_title") + "**")
+        st.sidebar.markdown("\n\n".join(lines))
+        return
+
+    with st.container(border=True):
+        st.markdown(f"### {t('server_monitor_title')}")
+        col_emby, col_jelly = st.columns(2)
+        for col, server, label_key in (
+            (col_emby, "emby", "emby_section"),
+            (col_jelly, "jellyfin", "jellyfin_section"),
+        ):
+            active = is_server_monitored(config, server, watcher_running)
+            light = "🟢" if active else "🔴"
+            status_label = t("server_monitor_on") if active else t("server_monitor_off")
+            with col:
+                st.markdown(
+                    f'<div style="text-align:center;padding:0.5rem 0">'
+                    f'<div style="font-size:2.75rem;line-height:1">{light}</div>'
+                    f'<div style="font-size:1.1rem;font-weight:600;margin-top:0.35rem">{t(label_key)}</div>'
+                    f'<div style="font-size:0.95rem;opacity:0.85">{status_label}</div>'
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+
 def render_auto_download_live_panel(saved: dict, refresh_seconds: int) -> None:
     render_deletion_prompts()
 
     status = load_watcher_status()
+    config = load_auto_download_config()
 
     col_a, col_b, col_c, col_d, col_e = st.columns(5)
     col_a.metric(
@@ -440,7 +508,8 @@ def render_auto_download_live_panel(saved: dict, refresh_seconds: int) -> None:
     if status.get("last_error"):
         err = status["last_error"]
         st.error(err)
-        if "localhost" in saved.get("emby_url", "") and "Connection refused" in err:
+        server_urls = [config.get("emby_url", ""), config.get("jellyfin_url", "")]
+        if any("localhost" in url for url in server_urls) and "Connection refused" in err:
             st.info(t("connection_refused_help"))
 
     history = load_playback_history().get("items", [])
@@ -481,6 +550,16 @@ def render_auto_download_live_panel(saved: dict, refresh_seconds: int) -> None:
 
 def render_auto_download_section() -> None:
     st.subheader(t("auto_download_title"))
+
+    refresh_seconds = 1
+
+    @st.fragment(run_every=timedelta(seconds=refresh_seconds))
+    def traffic_lights_panel() -> None:
+        config = load_auto_download_config()
+        status = load_watcher_status()
+        render_server_traffic_lights(config, bool(status.get("running")))
+
+    traffic_lights_panel()
     st.caption(t("auto_download_help"))
 
     saved = load_auto_download_config()
@@ -493,6 +572,8 @@ def render_auto_download_section() -> None:
             value=saved.get("prompt_delete_completed", True),
             help=t("prompt_delete_help"),
         )
+        st.markdown(f"**{t('emby_section')}**")
+        emby_enabled = st.checkbox(t("enable_emby"), value=saved.get("emby_enabled", False))
         emby_url = st.text_input(
             t("emby_url"),
             value=saved.get("emby_url", ""),
@@ -504,6 +585,22 @@ def render_auto_download_section() -> None:
             t("emby_username"),
             value=saved.get("emby_username", ""),
             help=t("emby_username_help"),
+        )
+        st.markdown(f"**{t('jellyfin_section')}**")
+        jellyfin_enabled = st.checkbox(t("enable_jellyfin"), value=saved.get("jellyfin_enabled", False))
+        jellyfin_url = st.text_input(
+            t("jellyfin_url"),
+            value=saved.get("jellyfin_url", ""),
+            placeholder="http://localhost:8096",
+            help=t("jellyfin_url_help"),
+        )
+        jellyfin_api_key = st.text_input(
+            t("jellyfin_api_key"), value=saved.get("jellyfin_api_key", ""), type="password"
+        )
+        jellyfin_username = st.text_input(
+            t("jellyfin_username"),
+            value=saved.get("jellyfin_username", ""),
+            help=t("jellyfin_username_help"),
         )
         series_dest_label = st.selectbox(
             t("series_dest_auto"),
@@ -525,15 +622,33 @@ def render_auto_download_section() -> None:
                 max_value=120,
                 value=int(saved.get("poll_interval_seconds", 20)),
             )
-        submitted = st.form_submit_button(t("save_auto_settings"))
+        col_save, col_test_emby, col_test_jelly = st.columns([2, 1, 1])
+        with col_save:
+            submitted = st.form_submit_button(t("save_auto_settings"), use_container_width=True)
+        with col_test_emby:
+            test_emby = st.form_submit_button(t("test_emby_connection"), use_container_width=True)
+        with col_test_jelly:
+            test_jellyfin = st.form_submit_button(t("test_jellyfin_connection"), use_container_width=True)
+
+    if test_emby:
+        ok, detail = test_media_server_connection("emby", emby_url, emby_api_key, emby_username)
+        show_media_server_test_result("emby", ok, detail)
+    if test_jellyfin:
+        ok, detail = test_media_server_connection("jellyfin", jellyfin_url, jellyfin_api_key, jellyfin_username)
+        show_media_server_test_result("jellyfin", ok, detail)
 
     if submitted:
         dest_path = SERIES_DEST_OPTIONS[series_labels.index(series_dest_label)][1]
         config = {
             "enabled": enabled,
+            "emby_enabled": emby_enabled,
             "emby_url": emby_url.strip(),
             "emby_api_key": emby_api_key.strip(),
             "emby_username": emby_username.strip(),
+            "jellyfin_enabled": jellyfin_enabled,
+            "jellyfin_url": jellyfin_url.strip(),
+            "jellyfin_api_key": jellyfin_api_key.strip(),
+            "jellyfin_username": jellyfin_username.strip(),
             "series_dest": dest_path,
             "cooldown_seconds": int(cooldown),
             "poll_interval_seconds": int(poll_interval),
@@ -542,7 +657,6 @@ def render_auto_download_section() -> None:
         save_auto_download_config(config)
         st.success(t("auto_settings_saved"))
 
-    refresh_seconds = 1
     st.divider()
 
     @st.fragment(run_every=timedelta(seconds=refresh_seconds))
@@ -601,6 +715,9 @@ selected_mode_label = st.sidebar.radio(t("mode_label"), mode_labels)
 mode_key = mode_keys[mode_labels.index(selected_mode_label)]
 
 if mode_key == "auto":
+    config = load_auto_download_config()
+    status = load_watcher_status()
+    render_server_traffic_lights(config, bool(status.get("running")), compact=True)
     render_auto_download_section()
     st.stop()
 

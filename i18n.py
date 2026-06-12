@@ -14,7 +14,7 @@ SUPPORTED_LANGS = {
 TRANSLATIONS: dict[str, dict[str, str]] = {
     "en": {
         "page_title": "Xtream VOD Downloader",
-        "app_title": "📺 Xtream VOD Downloader for Emby",
+        "app_title": "📺 Xtream VOD Downloader for Emby & Jellyfin",
         "lang_label": "Language",
         "all_categories": "All categories",
         "api_hint": "Tip: select a specific category instead of «All categories».",
@@ -46,7 +46,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "series_completed": "🗑️ Series completed",
         "series_completed_help": (
             "You finished watching these series. Delete downloaded files from disk "
-            "(folders under /download/tv)? `.strm` files in the Emby library are not touched."
+            "(folders under /download/tv)? `.strm` files in the media library are not touched."
         ),
         "folders_to_delete": "{count} folder(s) to delete",
         "btn_delete_yes": "✅ Yes, delete from disk",
@@ -67,12 +67,15 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "metric_download": "Download",
         "metric_queue": "Queued",
         "metric_cooldown": "Cooldown",
+        "server_monitor_title": "Monitored servers",
+        "server_monitor_on": "monitoring",
+        "server_monitor_off": "off",
         "now_playing": "Now playing: **{title}**",
         "download_paused_title": "Download paused: **{title}**",
         "last_action": "Last action: {action}",
         "connection_refused_help": (
             "If you see «Connection refused» with localhost, recreate the container with "
-            "`docker compose up -d` (network_mode: host) or use your Emby server's LAN IP."
+                "`docker compose up -d` (network_mode: host) or use your media server's LAN IP."
         ),
         "recent_playback": "**Recent playback**",
         "no_playback_yet": "No playback recorded yet.",
@@ -82,31 +85,48 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "download_line": "- **{title}** ({type}, {mode}) — {time}",
         "log_watcher": "Watcher log",
         "updated_at": "Updated at {time} (auto-refresh every {seconds}s)",
-        "auto_download_title": "🤖 Automatic download (Emby)",
+        "auto_download_title": "🤖 Automatic download (Emby / Jellyfin)",
         "auto_download_help": (
-            "When you finish an episode on Emby, subsequent episodes available in the library "
+            "When you finish an episode on Emby or Jellyfin, subsequent episodes available in the library "
             "as `.strm` only are downloaded to your download folders (same as manual mode). "
+            "You can enable **both** Emby and Jellyfin at once; the watcher monitors each configured server. "
             "If you watch from `.strm` (same Xtream provider), the download pauses and resumes "
             "when playback ends. Already downloaded local files do not block new downloads. "
             "**No need** to click «Connect and load catalog»: the watcher uses Xtream credentials "
-            "from the sidebar and polls Emby in the background. "
+            "from the sidebar and polls your media servers in the background. "
             "The status panel below refreshes automatically every second."
         ),
         "enable_auto": "Enable automatic download",
         "prompt_delete_completed": "Ask to delete completed series",
-        "prompt_delete_help": "When all episodes are marked watched on Emby, offer to delete downloaded files.",
+        "prompt_delete_help": "When all episodes are marked watched, offer to delete downloaded files.",
+        "emby_section": "Emby",
+        "jellyfin_section": "Jellyfin",
+        "enable_emby": "Monitor Emby",
+        "enable_jellyfin": "Monitor Jellyfin",
         "emby_url": "Emby URL",
         "emby_url_help": (
-            "With Docker network_mode host (WSL setup) use http://localhost:8096. "
-            "If Emby runs on another machine use its LAN IP, e.g. http://192.168.1.10:8096."
+            "Emby base URL. With Docker network_mode host use http://localhost:8096. "
+            "On another machine use its LAN IP, e.g. http://192.168.1.10:8096."
+        ),
+        "jellyfin_url": "Jellyfin URL",
+        "jellyfin_url_help": (
+            "Jellyfin base URL (often a different port than Emby, e.g. http://localhost:8096)."
         ),
         "emby_api_key": "Emby API key",
+        "jellyfin_api_key": "Jellyfin API key",
         "emby_username": "Emby username",
-        "emby_username_help": "Must match the user watching content on Apple TV / other clients.",
+        "jellyfin_username": "Jellyfin username",
+        "emby_username_help": "Must match the Emby user watching content on Apple TV / other clients.",
+        "jellyfin_username_help": "Must match the Jellyfin user watching content on Apple TV / other clients.",
         "series_dest_auto": "Series destination (automatic)",
         "cooldown_seconds": "Pause after episode ends (seconds)",
-        "poll_interval": "Emby poll interval (seconds)",
+        "poll_interval": "Server poll interval (seconds)",
         "save_auto_settings": "💾 Save automatic settings",
+        "test_emby_connection": "🔌 Test Emby",
+        "test_jellyfin_connection": "🔌 Test Jellyfin",
+        "server_test_missing_fields": "Fill in URL, API key and username first.",
+        "server_test_ok": "**{server}** — {detail}",
+        "server_test_fail": "**{server}** — {detail}",
         "auto_settings_saved": "Settings saved. The watcher will pick them up within 15 seconds.",
         "sidebar_login": "🔑 Xtream Login",
         "build": "Build {version}",
@@ -165,7 +185,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
     },
     "it": {
         "page_title": "Xtream VOD Downloader",
-        "app_title": "📺 Xtream VOD Downloader per Emby",
+        "app_title": "📺 Xtream VOD Downloader per Emby e Jellyfin",
         "lang_label": "Lingua",
         "all_categories": "Tutte le categorie",
         "api_hint": "Suggerimento: seleziona una categoria specifica invece di «Tutte le categorie».",
@@ -197,7 +217,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "series_completed": "🗑️ Serie completata",
         "series_completed_help": (
             "Hai finito di guardare queste serie. Vuoi eliminare dal disco i file scaricati "
-            "(le cartelle in /download/tv)? Gli `.strm` in libreria Emby non vengono toccati."
+            "(le cartelle in /download/tv)? Gli `.strm` in libreria non vengono toccati."
         ),
         "folders_to_delete": "{count} cartella/e da eliminare",
         "btn_delete_yes": "✅ Sì, elimina dal disco",
@@ -218,12 +238,15 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "metric_download": "Download",
         "metric_queue": "In coda",
         "metric_cooldown": "Cooldown",
+        "server_monitor_title": "Server monitorati",
+        "server_monitor_on": "monitorato",
+        "server_monitor_off": "spento",
         "now_playing": "In riproduzione: **{title}**",
         "download_paused_title": "Download in pausa: **{title}**",
         "last_action": "Ultima azione: {action}",
         "connection_refused_help": (
             "Se vedi «Connection refused» con localhost, ricrea il container con "
-            "`docker compose up -d` (network_mode: host) oppure usa l'IP LAN del server Emby."
+                "`docker compose up -d` (network_mode: host) oppure usa l'IP LAN del media server."
         ),
         "recent_playback": "**Ultime riproduzioni**",
         "no_playback_yet": "Nessuna riproduzione registrata ancora.",
@@ -233,31 +256,48 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "download_line": "- **{title}** ({type}, {mode}) — {time}",
         "log_watcher": "Log watcher",
         "updated_at": "Aggiornato alle {time} (refresh automatico ogni {seconds}s)",
-        "auto_download_title": "🤖 Download automatico (Emby)",
+        "auto_download_title": "🤖 Download automatico (Emby / Jellyfin)",
         "auto_download_help": (
-            "Quando finisci un episodio su Emby, gli episodi successivi presenti in libreria "
+            "Quando finisci un episodio su Emby o Jellyfin, gli episodi successivi presenti in libreria "
             "solo come `.strm` vengono scaricati nelle cartelle di download (come la modalità manuale). "
+            "Puoi abilitare **entrambi** Emby e Jellyfin: il watcher monitora ogni server configurato. "
             "Se guardi da `.strm` (stesso provider Xtream), il download va in pausa e riprende "
             "automaticamente a fine riproduzione. I file locali già scaricati non bloccano il download. "
             "**Non serve** premere «Connetti e carica catalogo»: il watcher usa le credenziali Xtream "
-            "della sidebar e interroga Emby in background. "
+            "della sidebar e interroga i media server in background. "
             "Lo stato sotto si aggiorna da solo ogni secondo."
         ),
         "enable_auto": "Abilita download automatico",
         "prompt_delete_completed": "Chiedi eliminazione serie completata",
-        "prompt_delete_help": "Quando tutti gli episodi risultano visti su Emby, propone di cancellare i file scaricati.",
+        "prompt_delete_help": "Quando tutti gli episodi risultano visti, propone di cancellare i file scaricati.",
+        "emby_section": "Emby",
+        "jellyfin_section": "Jellyfin",
+        "enable_emby": "Monitora Emby",
+        "enable_jellyfin": "Monitora Jellyfin",
         "emby_url": "URL Emby",
         "emby_url_help": (
-            "Con Docker in network_mode host (setup WSL) usa http://localhost:8096. "
-            "Se Emby è su un altro PC usa il suo IP LAN, es. http://192.168.1.10:8096."
+            "URL base di Emby. Con Docker network_mode host usa http://localhost:8096. "
+            "Se il server è su un altro PC usa il suo IP LAN, es. http://192.168.1.10:8096."
         ),
-        "emby_api_key": "API Key Emby",
+        "jellyfin_url": "URL Jellyfin",
+        "jellyfin_url_help": (
+            "URL base di Jellyfin (spesso porta diversa da Emby, es. http://localhost:8096)."
+        ),
+        "emby_api_key": "API key Emby",
+        "jellyfin_api_key": "API key Jellyfin",
         "emby_username": "Username Emby",
-        "emby_username_help": "Deve corrispondere all'utente che guarda i contenuti su Apple TV / altri client.",
+        "jellyfin_username": "Username Jellyfin",
+        "emby_username_help": "Deve corrispondere all'utente Emby che guarda i contenuti su Apple TV / altri client.",
+        "jellyfin_username_help": "Deve corrispondere all'utente Jellyfin che guarda i contenuti su Apple TV / altri client.",
         "series_dest_auto": "Destinazione serie (automatico)",
         "cooldown_seconds": "Pausa dopo fine episodio (secondi)",
-        "poll_interval": "Intervallo controllo Emby (secondi)",
+        "poll_interval": "Intervallo controllo server (secondi)",
         "save_auto_settings": "💾 Salva impostazioni automatiche",
+        "test_emby_connection": "🔌 Test Emby",
+        "test_jellyfin_connection": "🔌 Test Jellyfin",
+        "server_test_missing_fields": "Compila prima URL, API key e username.",
+        "server_test_ok": "**{server}** — {detail}",
+        "server_test_fail": "**{server}** — {detail}",
         "auto_settings_saved": "Impostazioni salvate. Il watcher leggerà le nuove impostazioni entro 15 secondi.",
         "sidebar_login": "🔑 Xtream Login",
         "build": "Build {version}",

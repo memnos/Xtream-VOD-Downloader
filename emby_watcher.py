@@ -27,6 +27,14 @@ from deletion import (
 
 
 @dataclass
+class MediaSession:
+    server_id: str
+    client: "MediaServerClient"
+    user_id: str
+    username: str
+
+
+@dataclass
 class PlayingItem:
     item_type: str
     item_id: str
@@ -37,17 +45,24 @@ class PlayingItem:
     series_name: str = ""
     season: int | None = None
     episode: int | None = None
+    server_id: str = ""
 
     @property
     def key(self) -> str:
+        prefix = f"{self.server_id}:" if self.server_id else ""
         if self.item_type == "Episode":
-            return f"ep:{self.series_id}:{self.season}:{self.episode}"
-        return f"movie:{self.item_id}"
+            return f"ep:{prefix}{self.series_id}:{self.season}:{self.episode}"
+        return f"movie:{prefix}{self.item_id}"
 
     def display_label(self) -> str:
-        if self.item_type == "Episode":
-            return f"{self.series_name} S{int(self.season):02d}E{int(self.episode):02d}"
-        return self.title
+        label = (
+            f"{self.series_name} S{int(self.season):02d}E{int(self.episode):02d}"
+            if self.item_type == "Episode"
+            else self.title
+        )
+        if self.server_id:
+            return f"{label} ({self.server_id})"
+        return label
 
     def history_type(self) -> str:
         return "Series" if self.item_type == "Episode" else "Movie"
@@ -94,20 +109,68 @@ class WatcherStatus:
     log: list[str] = field(default_factory=list)
 
 
-class EmbyClient:
-    def __init__(self, base_url: str, api_key: str):
+class MediaServerClient:
+    """Emby and Jellyfin client (Jellyfin exposes a compatible /emby/* API)."""
+
+    def __init__(self, base_url: str, api_key: str, server_type: str = "emby"):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
+        self.server_type = (server_type or "emby").lower()
         self._user_id_cache: str | None = None
 
+    @property
+    def display_name(self) -> str:
+        return "Jellyfin" if self.server_type == "jellyfin" else "Emby"
+
+    def _request_paths(self, path: str) -> list[str]:
+        paths = [path]
+        if self.server_type == "jellyfin" and path.startswith("/emby/"):
+            paths.append(path[5:])
+        return paths
+
     def _get(self, path: str, params: dict | None = None) -> object:
-        query = {"api_key": self.api_key}
-        if params:
-            query.update(params)
-        url = f"{self.base_url}{path}"
-        response = requests.get(url, params=query, timeout=30)
-        response.raise_for_status()
-        return response.json()
+        headers = {"X-Emby-Token": self.api_key}
+        last_error: Exception | None = None
+        for api_path in self._request_paths(path):
+            query = {"api_key": self.api_key}
+            if params:
+                query.update(params)
+            url = f"{self.base_url}{api_path}"
+            try:
+                response = requests.get(url, params=query, headers=headers, timeout=30)
+                response.raise_for_status()
+                return response.json()
+            except requests.HTTPError as exc:
+                last_error = exc
+                if exc.response is not None and exc.response.status_code == 404:
+                    continue
+                raise
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"API request failed: {path}")
+
+    def test_connection(self, username: str) -> tuple[bool, str]:
+        try:
+            users = self._get("/emby/Users")
+            if not isinstance(users, list):
+                return False, "Unexpected API response for /Users"
+            user_id = self.resolve_user_id(username)
+            if not user_id:
+                names = ", ".join(str(user.get("Name", "")) for user in users if user.get("Name"))
+                hint = f" Available users: {names}" if names else ""
+                return False, f"User '{username}' not found.{hint}"
+            sessions = self.get_sessions()
+            return True, f"Connected — user '{username}' OK, {len(sessions)} active session(s)"
+        except requests.ConnectionError:
+            return False, "Connection refused — check URL and that the server is reachable from the container"
+        except requests.Timeout:
+            return False, "Connection timed out"
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 401:
+                return False, "Invalid API key (HTTP 401)"
+            return False, str(exc)
+        except Exception as exc:
+            return False, str(exc)
 
     def resolve_user_id(self, username: str) -> str | None:
         if self._user_id_cache:
@@ -151,6 +214,9 @@ class EmbyClient:
         return str(data.get("Name") or data.get("OriginalTitle") or "").strip()
 
 
+EmbyClient = MediaServerClient
+
+
 class AutoDownloadWatcher:
     MAX_LOG_LINES = 80
 
@@ -162,6 +228,7 @@ class AutoDownloadWatcher:
         self._status = WatcherStatus()
         self._queue: list[QueueItem] = []
         self._watching_item: PlayingItem | None = None
+        self._watching_session: MediaSession | None = None
         self._xtream_stream_active = False
         self._cooldown_until = 0.0
         self._skip_cooldown_once = False
@@ -245,6 +312,52 @@ class AutoDownloadWatcher:
             self._status.running = False
         self._log("Watcher fermato")
 
+    def _build_media_sessions(self, config: dict) -> list[MediaSession]:
+        sessions: list[MediaSession] = []
+        servers = (
+            ("emby", "emby_enabled", "emby_url", "emby_api_key", "emby_username"),
+            ("jellyfin", "jellyfin_enabled", "jellyfin_url", "jellyfin_api_key", "jellyfin_username"),
+        )
+        for server_id, enabled_key, url_key, key_key, user_key in servers:
+            if not config.get(enabled_key):
+                continue
+            url = str(config.get(url_key, "")).strip()
+            api_key = str(config.get(key_key, "")).strip()
+            username = str(config.get(user_key, "")).strip()
+            if not url or not api_key or not username:
+                continue
+            client = MediaServerClient(url, api_key, server_id)
+            user_id = client.resolve_user_id(username)
+            if not user_id:
+                self._log(f"{client.display_name}: user not found ({username})")
+                continue
+            sessions.append(MediaSession(server_id, client, user_id, username))
+        return sessions
+
+    def _find_active_playback(
+        self, sessions: list[MediaSession], xtream_host: str
+    ) -> tuple[PlayingItem | None, MediaSession | None]:
+        playing: PlayingItem | None = None
+        active_session: MediaSession | None = None
+        for session in sessions:
+            try:
+                item = self._find_user_playing(session.client, session.username, xtream_host)
+            except Exception as exc:
+                self._log(f"{session.client.display_name}: {exc}")
+                continue
+            if not item:
+                continue
+            item.server_id = session.server_id
+            if playing is None:
+                playing = item
+                active_session = session
+            elif playing.key != item.key:
+                self._log(
+                    f"Riproduzione su più server; mantengo {playing.server_id}: "
+                    f"{playing.display_label()}"
+                )
+        return playing, active_session
+
     def _tick(self, config: dict) -> None:
         creds = load_credentials()
         host = creds.get("host", "")
@@ -253,19 +366,12 @@ class AutoDownloadWatcher:
         if not host or not xtream_user or not xtream_pw:
             return
 
-        emby_url = str(config.get("emby_url", "")).strip()
-        emby_key = str(config.get("emby_api_key", "")).strip()
-        emby_user = str(config.get("emby_username", "")).strip()
-        if not emby_url or not emby_key or not emby_user:
+        sessions = self._build_media_sessions(config)
+        if not sessions:
             return
 
-        emby = EmbyClient(emby_url, emby_key)
-        user_id = emby.resolve_user_id(emby_user)
-        if not user_id:
-            raise RuntimeError(f"Utente Emby non trovato: {emby_user}")
-
-        playing = self._find_user_playing(emby, emby_user, host)
-        if playing:
+        playing, active_session = self._find_active_playback(sessions, host)
+        if playing and active_session:
             if self._watching_item and self._watching_item.key != playing.key:
                 self._record_playback(self._watching_item)
             if playing.blocks_download:
@@ -278,12 +384,15 @@ class AutoDownloadWatcher:
                     self._log("Riproduzione da file locale: download consentito")
                 self._xtream_stream_active = False
             self._watching_item = playing
+            self._watching_session = active_session
             return
 
         if self._watching_item:
             ended = self._watching_item
+            ended_session = self._watching_session
             was_strm = self._xtream_stream_active
             self._watching_item = None
+            self._watching_session = None
             self._xtream_stream_active = False
             self._record_playback(ended)
 
@@ -296,17 +405,19 @@ class AutoDownloadWatcher:
                 self._cooldown_until = time.time() + cooldown
                 self._log(f"Fine riproduzione: {ended.display_label()} (pausa {cooldown}s)")
 
-            if ended.item_type == "Episode":
+            if ended.item_type == "Episode" and ended_session:
                 self._enqueue_subsequent(
-                    emby=emby,
-                    user_id=user_id,
+                    media=ended_session.client,
+                    user_id=ended_session.user_id,
                     ended=ended,
                     dest_root=str(config.get("series_dest", "")),
                     xtream_host=host,
                     xtream_user=xtream_user,
                     xtream_pw=xtream_pw,
                 )
-                self._maybe_prompt_series_deletion(emby, user_id, ended, config)
+                self._maybe_prompt_series_deletion(
+                    ended_session.client, ended_session.user_id, ended, config,
+                )
 
         if self._xtream_stream_active:
             return
@@ -342,10 +453,10 @@ class AutoDownloadWatcher:
         self._download_thread.start()
 
     def _find_user_playing(
-        self, emby: EmbyClient, username: str, xtream_host: str
+        self, media: MediaServerClient, username: str, xtream_host: str
     ) -> PlayingItem | None:
         target = username.strip().lower()
-        for session in emby.get_sessions():
+        for session in media.get_sessions():
             if str(session.get("UserName", "")).lower() != target:
                 continue
             item = session.get("NowPlayingItem") or {}
@@ -526,11 +637,11 @@ class AutoDownloadWatcher:
         self._persist_status()
 
     def _maybe_prompt_series_deletion(
-        self, emby: EmbyClient, user_id: str, ended: PlayingEpisode, config: dict,
+        self, media: MediaServerClient, user_id: str, ended: PlayingEpisode, config: dict,
     ) -> None:
         if not config.get("prompt_delete_completed", True):
             return
-        episodes = emby.get_series_episodes(user_id, ended.series_id, include_user_data=True)
+        episodes = media.get_series_episodes(user_id, ended.series_id, include_user_data=True)
         if not should_prompt_series_deletion(episodes, ended.season, ended.episode):
             return
         paths = find_series_download_paths(ended.series_name)
@@ -541,14 +652,14 @@ class AutoDownloadWatcher:
             with self._lock:
                 self._status.last_action = f"Serie completata: {ended.series_name}"
 
-    def _episode_path(self, emby: EmbyClient, user_id: str, ep: dict) -> str:
+    def _episode_path(self, media: MediaServerClient, user_id: str, ep: dict) -> str:
         path = str(ep.get("Path", "")).strip()
         if path:
             return path
         item_id = ep.get("Id")
         if not item_id:
             return ""
-        detail = emby.get_item(user_id, str(item_id), "Path")
+        detail = media.get_item(user_id, str(item_id), "Path")
         if not detail:
             return ""
         return str(detail.get("Path", "")).strip()
@@ -624,7 +735,7 @@ class AutoDownloadWatcher:
 
     def _enqueue_subsequent(
         self,
-        emby: EmbyClient,
+        media: MediaServerClient,
         user_id: str,
         ended: PlayingEpisode,
         dest_root: str,
@@ -633,11 +744,11 @@ class AutoDownloadWatcher:
         xtream_pw: str,
     ) -> None:
         series_names = [ended.series_name]
-        emby_series_name = emby.get_series_name(user_id, ended.series_id)
-        if emby_series_name and emby_series_name not in series_names:
-            series_names.append(emby_series_name)
+        library_series_name = media.get_series_name(user_id, ended.series_id)
+        if library_series_name and library_series_name not in series_names:
+            series_names.append(library_series_name)
 
-        episodes = emby.get_series_episodes(user_id, ended.series_id)
+        episodes = media.get_series_episodes(user_id, ended.series_id)
         candidates: list[QueueItem] = []
         stats = {
             "after_current": 0,
@@ -656,7 +767,7 @@ class AutoDownloadWatcher:
                 continue
             stats["after_current"] += 1
 
-            path = self._episode_path(emby, user_id, ep)
+            path = self._episode_path(media, user_id, ep)
             if not path.lower().endswith(".strm"):
                 stats["not_strm"] += 1
                 continue
@@ -706,7 +817,7 @@ class AutoDownloadWatcher:
 
         details = []
         if stats["after_current"]:
-            details.append(f"{stats['after_current']} in Emby")
+            details.append(f"{stats['after_current']} in library")
         if stats["not_strm"]:
             details.append(f"{stats['not_strm']} senza .strm")
         if stats["no_xtream"]:

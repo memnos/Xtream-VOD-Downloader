@@ -232,14 +232,46 @@ def clear_credentials() -> None:
 def default_auto_download_config() -> dict:
     return {
         "enabled": False,
+        "emby_enabled": bool(os.environ.get("EMBY_URL", "")),
         "emby_url": os.environ.get("EMBY_URL", ""),
         "emby_api_key": os.environ.get("EMBY_API_KEY", ""),
         "emby_username": os.environ.get("EMBY_USERNAME", ""),
+        "jellyfin_enabled": bool(os.environ.get("JELLYFIN_URL", "")),
+        "jellyfin_url": os.environ.get("JELLYFIN_URL", ""),
+        "jellyfin_api_key": os.environ.get("JELLYFIN_API_KEY", ""),
+        "jellyfin_username": os.environ.get("JELLYFIN_USERNAME", ""),
         "series_dest": DEFAULT_SERIES_DEST,
         "cooldown_seconds": int(os.environ.get("AUTO_COOLDOWN_SECONDS", "90")),
         "poll_interval_seconds": int(os.environ.get("AUTO_POLL_INTERVAL_SECONDS", "20")),
         "prompt_delete_completed": True,
     }
+
+
+def _migrate_auto_download_config(merged: dict, raw: dict | None = None) -> dict:
+    """Migrate legacy single-server media_server config to dual Emby + Jellyfin."""
+    raw = raw or {}
+    if "emby_enabled" not in raw and "jellyfin_enabled" not in raw and merged.get("media_server"):
+        legacy_url = str(merged.get("emby_url", "")).strip()
+        legacy_key = str(merged.get("emby_api_key", "")).strip()
+        legacy_user = str(merged.get("emby_username", "")).strip()
+        has_legacy = bool(legacy_url and legacy_key and legacy_user)
+        if merged.get("media_server") == "jellyfin" and has_legacy:
+            merged["jellyfin_enabled"] = True
+            merged["jellyfin_url"] = legacy_url
+            merged["jellyfin_api_key"] = legacy_key
+            merged["jellyfin_username"] = legacy_user
+            merged["emby_enabled"] = False
+        elif has_legacy:
+            merged["emby_enabled"] = True
+            merged.setdefault("jellyfin_enabled", False)
+    merged.setdefault("emby_enabled", False)
+    merged.setdefault("jellyfin_enabled", False)
+    merged.setdefault("jellyfin_url", "")
+    merged.setdefault("jellyfin_api_key", "")
+    merged.setdefault("jellyfin_username", "")
+    merged["emby_enabled"] = bool(merged.get("emby_enabled"))
+    merged["jellyfin_enabled"] = bool(merged.get("jellyfin_enabled"))
+    return merged
 
 
 def load_auto_download_config() -> dict:
@@ -250,7 +282,7 @@ def load_auto_download_config() -> dict:
     merged = {**defaults, **data}
     if merged["series_dest"] not in DOWNLOAD_CONFIG.values():
         merged["series_dest"] = DEFAULT_SERIES_DEST
-    return merged
+    return _migrate_auto_download_config(merged, data)
 
 
 def save_auto_download_config(config: dict) -> None:
