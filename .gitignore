@@ -1,0 +1,26 @@
+# Local data and secrets (never commit)
+.data/*
+!.data/.gitkeep
+*.json
+!config/examples/*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+wheels/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Docker overrides with personal paths
+docker-compose.override.yml
+.env
+
+# Downloads (local test folders)
+downloads/

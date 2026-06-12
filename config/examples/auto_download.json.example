@@ -1,0 +1,10 @@
+{
+  "enabled": false,
+  "emby_url": "http://localhost:8096",
+  "emby_api_key": "YOUR_EMBY_API_KEY",
+  "emby_username": "YOUR_EMBY_USERNAME",
+  "series_dest": "/download/tv",
+  "cooldown_seconds": 90,
+  "poll_interval_seconds": 20,
+  "prompt_delete_completed": true
+}

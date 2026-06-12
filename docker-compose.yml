@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  xtream-downloader:
+    build: .
+    container_name: xtream-downloader
+    # Use host network so the container can reach Emby on localhost (common WSL/Docker setup).
+    # On plain Docker Desktop you may switch to bridge mode and publish port 8501 instead.
+    network_mode: host
+    volumes:
+      - ./.data:/app/.data
+      - ${MOVIES_PATH:-./downloads/movies}:/download/movies
+      - ${TV_PATH:-./downloads/tv}:/download/tv
+      - ${TV2_PATH:-./downloads/tv2}:/download/tv-2
+    environment:
+      - TZ=${TZ:-UTC}
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - UI_LANG=${UI_LANG:-en}
+      - STREAMLIT_SERVER_FILE_WATCHER_TYPE=none
+    restart: unless-stopped
