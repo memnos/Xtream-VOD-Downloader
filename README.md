@@ -32,8 +32,8 @@ Additional capabilities:
 ### 1. Clone
 
 ```bash
-git clone https://github.com/memnos/xtream-emby-downloader.git
-cd xtream-emby-downloader
+git clone https://github.com/memnos/Xtream-VOD-Downloader.git
+cd Xtream-VOD-Downloader
 ```
 
 ### 2. Configure paths

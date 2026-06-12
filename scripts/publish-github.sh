@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -eu
 GH="${GH_BIN:-gh}"
-REPO_NAME="${1:-xtream-emby-downloader}"
+REPO_NAME="${1:-Xtream-VOD-Downloader}"
 "$GH" repo create "$REPO_NAME" \
   --public \
   --description "Streamlit + yt-dlp downloader for Xtream VOD with Emby auto-download watcher (EN/IT)" \
