@@ -123,10 +123,9 @@ class MediaServerClient:
         return "Jellyfin" if self.server_type == "jellyfin" else "Emby"
 
     def _request_paths(self, path: str) -> list[str]:
-        paths = [path]
         if self.server_type == "jellyfin" and path.startswith("/emby/"):
-            paths.append(path[5:])
-        return paths
+            return [path[5:], path]
+        return [path]
 
     def _get(self, path: str, params: dict | None = None) -> object:
         headers = {"X-Emby-Token": self.api_key}
@@ -136,15 +135,26 @@ class MediaServerClient:
             if params:
                 query.update(params)
             url = f"{self.base_url}{api_path}"
-            try:
-                response = requests.get(url, params=query, headers=headers, timeout=30)
-                response.raise_for_status()
-                return response.json()
-            except requests.HTTPError as exc:
-                last_error = exc
-                if exc.response is not None and exc.response.status_code == 404:
-                    continue
-                raise
+            for attempt in range(3):
+                try:
+                    response = requests.get(url, params=query, headers=headers, timeout=30)
+                    response.raise_for_status()
+                    return response.json()
+                except requests.HTTPError as exc:
+                    last_error = exc
+                    status = exc.response.status_code if exc.response is not None else 0
+                    if status in {502, 503, 504} and attempt < 2:
+                        time.sleep(1 + attempt)
+                        continue
+                    if status == 404:
+                        break
+                    raise
+                except (requests.ConnectionError, requests.Timeout) as exc:
+                    last_error = exc
+                    if attempt < 2:
+                        time.sleep(1 + attempt)
+                        continue
+                    raise
         if last_error is not None:
             raise last_error
         raise RuntimeError(f"API request failed: {path}")
@@ -168,6 +178,12 @@ class MediaServerClient:
         except requests.HTTPError as exc:
             if exc.response is not None and exc.response.status_code == 401:
                 return False, "Invalid API key (HTTP 401)"
+            if exc.response is not None and exc.response.status_code in {502, 503, 504}:
+                return (
+                    False,
+                    f"Server temporarily unavailable (HTTP {exc.response.status_code}) — "
+                    "retry in a few seconds; Jellyfin may still be starting",
+                )
             return False, str(exc)
         except Exception as exc:
             return False, str(exc)
@@ -237,6 +253,7 @@ class AutoDownloadWatcher:
         self._paused_download: PausedDownload | None = None
         self._download_context: dict | None = None
         self._last_progress_persist = 0.0
+        self._session_cache: dict[str, tuple[tuple[str, str, str, str], MediaSession]] = {}
 
     def _status_snapshot(self) -> dict:
         cooldown = max(0, int(self._cooldown_until - time.time()))
@@ -300,6 +317,8 @@ class AutoDownloadWatcher:
                 break
             try:
                 self._tick(config)
+                with self._lock:
+                    self._status.last_error = ""
             except Exception as exc:
                 with self._lock:
                     self._status.last_error = str(exc)
@@ -314,24 +333,44 @@ class AutoDownloadWatcher:
 
     def _build_media_sessions(self, config: dict) -> list[MediaSession]:
         sessions: list[MediaSession] = []
+        active_servers: set[str] = set()
         servers = (
             ("emby", "emby_enabled", "emby_url", "emby_api_key", "emby_username"),
             ("jellyfin", "jellyfin_enabled", "jellyfin_url", "jellyfin_api_key", "jellyfin_username"),
         )
         for server_id, enabled_key, url_key, key_key, user_key in servers:
             if not config.get(enabled_key):
+                self._session_cache.pop(server_id, None)
                 continue
             url = str(config.get(url_key, "")).strip()
             api_key = str(config.get(key_key, "")).strip()
             username = str(config.get(user_key, "")).strip()
             if not url or not api_key or not username:
+                self._session_cache.pop(server_id, None)
                 continue
-            client = MediaServerClient(url, api_key, server_id)
-            user_id = client.resolve_user_id(username)
-            if not user_id:
-                self._log(f"{client.display_name}: user not found ({username})")
+            active_servers.add(server_id)
+            cache_key = (server_id, url, api_key, username)
+            cached = self._session_cache.get(server_id)
+            if cached and cached[0] == cache_key:
+                sessions.append(cached[1])
                 continue
-            sessions.append(MediaSession(server_id, client, user_id, username))
+            try:
+                client = MediaServerClient(url, api_key, server_id)
+                user_id = client.resolve_user_id(username)
+                if not user_id:
+                    self._session_cache.pop(server_id, None)
+                    self._log(f"{client.display_name}: user not found ({username})")
+                    continue
+                session = MediaSession(server_id, client, user_id, username)
+                self._session_cache[server_id] = (cache_key, session)
+                sessions.append(session)
+            except Exception as exc:
+                self._session_cache.pop(server_id, None)
+                label = "Jellyfin" if server_id == "jellyfin" else "Emby"
+                self._log(f"{label}: {exc}")
+        for server_id in list(self._session_cache):
+            if server_id not in active_servers:
+                self._session_cache.pop(server_id, None)
         return sessions
 
     def _find_active_playback(

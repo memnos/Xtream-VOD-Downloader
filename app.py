@@ -44,7 +44,7 @@ from i18n import (
     translate_history_type,
 )
 
-APP_VERSION = "2.14.3"
+APP_VERSION = "2.14.4"
 PENDING_DOWNLOAD_KEY = "pending_download_job"
 
 SERIES_DEST_OPTIONS = [
