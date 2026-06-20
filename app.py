@@ -10,11 +10,25 @@ from core import (
     DEFAULT_SERIES_DEST,
     build_episode_output,
     build_movie_output,
+    catalog_title_key,
     clear_credentials,
+    clear_probe_cache_for_items,
+    dedupe_catalog_by_quality,
     describe_existing_file,
+    catalog_category_name,
     exclude_hidden_items,
+    format_quality_label,
+    group_catalog_versions,
     hidden_category_ids,
+    is_4k_probe,
+    is_4k_title,
+    item_file_size_bytes,
     live_cooldown_remaining,
+    pick_best_catalog_item,
+    probe_file_size_bytes,
+    probe_movie_versions,
+    format_file_size,
+    sort_catalog_versions,
     ensure_download_tree_permissions,
     load_auto_download_config,
     load_credentials,
@@ -44,7 +58,7 @@ from i18n import (
     translate_history_type,
 )
 
-APP_VERSION = "2.14.4"
+APP_VERSION = "2.16.1"
 PENDING_DOWNLOAD_KEY = "pending_download_job"
 
 SERIES_DEST_OPTIONS = [
@@ -150,6 +164,229 @@ def load_catalog(host: str, user: str, pw: str, action: str, category_id: str | 
     except RuntimeError:
         st.error(t("catalog_load_failed"))
         return []
+
+
+def save_allow_4k_setting() -> None:
+    config = load_auto_download_config()
+    config["allow_4k"] = bool(st.session_state.get("allow_4k_setting", False))
+    save_auto_download_config(config)
+
+
+def render_quality_catalog(
+    items: list[dict],
+    allow_4k: bool,
+) -> tuple[list[dict], int]:
+    deduped, total = dedupe_catalog_by_quality(items, allow_4k=allow_4k)
+    return sorted(deduped, key=lambda item: item["name"].lower()), total
+
+
+def _format_version_quality_line(
+    version: dict,
+    probe: dict | None,
+    category_map: dict[str, str],
+    *,
+    show_ids: bool,
+) -> str:
+    stream_id = str(version.get("stream_id", ""))
+    quality = format_quality_label(version.get("name", ""), probe)
+    if quality == "—":
+        quality = t("quality_unknown")
+    size_bytes, estimated = probe_file_size_bytes(version, probe)
+    size_label = format_file_size(size_bytes, estimated=estimated)
+    if size_label and size_label not in quality:
+        quality = f"{quality} · {size_label}"
+    if show_ids:
+        quality = t("quality_with_id", stream_id=stream_id, quality=quality)
+    if probe and probe.get("from_cache"):
+        quality = f"{quality} {t('quality_from_cache')}"
+    category = catalog_category_name(version, category_map) or t("category_unknown")
+    return t("quality_with_category", quality=quality, category=category)
+
+
+def _version_option_label(
+    version: dict,
+    probe: dict | None,
+    category_map: dict[str, str],
+    *,
+    show_ids: bool,
+    suggested_id,
+) -> str:
+    line = _format_version_quality_line(
+        version, probe, category_map, show_ids=show_ids
+    )
+    name = version.get("name", "")
+    if version.get("stream_id") == suggested_id:
+        return t("version_option_suggested", line=line, name=name)
+    return t("version_option", line=line, name=name)
+
+
+def _probe_movie_group(
+    versions: list[dict],
+    host: str,
+    user: str,
+    password: str,
+    session_key: str,
+    *,
+    force: bool = False,
+) -> tuple[dict[str, dict], dict[str, int]]:
+    if force:
+        clear_probe_cache_for_items(versions)
+        st.session_state.pop(session_key, None)
+
+    probes: dict[str, dict] = dict(st.session_state.get(session_key, {}))
+    missing = [
+        version
+        for version in versions
+        if str(version.get("stream_id", "")) not in probes
+    ]
+    if missing:
+        progress = st.empty()
+        with st.spinner(t("quality_probing")):
+            def _progress(current: int, total: int, stream_id: str) -> None:
+                progress.caption(
+                    t("quality_probing_progress", current=current, total=total, stream_id=stream_id)
+                )
+
+            new_probes, stats = probe_movie_versions(
+                missing,
+                host,
+                user,
+                password,
+                progress_callback=_progress,
+            )
+            probes.update(new_probes)
+            st.session_state[session_key] = probes
+            progress.caption(t("quality_probe_summary", **stats))
+        return probes, stats
+
+    stats = {"total": len(versions), "fresh": 0, "cached": 0, "failed": 0}
+    for version in versions:
+        probe = probes.get(str(version.get("stream_id", "")))
+        if not probe:
+            continue
+        if probe.get("failed"):
+            stats["failed"] += 1
+        elif probe.get("from_cache", True):
+            stats["cached"] += 1
+        else:
+            stats["fresh"] += 1
+    return probes, stats
+
+
+def render_movie_available_qualities(
+    selected_movie: dict,
+    version_groups: dict[str, list[dict]],
+    allow_4k: bool,
+    host: str,
+    user: str,
+    password: str,
+    category_map: dict[str, str],
+) -> dict:
+    key = catalog_title_key(selected_movie.get("name", ""))
+    versions = version_groups.get(key, [selected_movie])
+    if not versions:
+        return selected_movie
+
+    session_key = f"movie_probes_{key}"
+    choice_key = f"movie_version_choice_{key}"
+    reanalyze_key = f"reanalyze_{key}"
+
+    if st.session_state.pop(reanalyze_key, False):
+        probes, stats = _probe_movie_group(
+            versions, host, user, password, session_key, force=True
+        )
+        st.caption(t("quality_probe_summary", **stats))
+    else:
+        probes, stats = _probe_movie_group(
+            versions, host, user, password, session_key, force=False
+        )
+        if stats["total"] > 0:
+            st.caption(t("quality_probe_summary", **stats))
+
+    versions = sort_catalog_versions(versions, probes)
+    suggested = pick_best_catalog_item(versions, allow_4k=allow_4k, probes=probes) or selected_movie
+    show_ids = len(versions) > 1
+
+    header_col, action_col = st.columns([4, 1])
+    with header_col:
+        st.markdown(f"**{t('available_qualities')}**")
+        if len(versions) > 1:
+            st.caption(t("quality_versions_count", count=len(versions)))
+    with action_col:
+        if st.button(t("reanalyze_quality"), key=f"btn_reanalyze_{key}", use_container_width=True):
+            st.session_state[reanalyze_key] = True
+            st.rerun()
+
+    suggested_id = suggested.get("stream_id")
+    selectable_versions: list[dict] = []
+    excluded_versions: list[dict] = []
+    for version in versions:
+        probe = probes.get(str(version.get("stream_id", "")))
+        excluded = (
+            is_4k_title(version.get("name", "")) or is_4k_probe(probe)
+        ) and not allow_4k
+        if excluded:
+            excluded_versions.append(version)
+        else:
+            selectable_versions.append(version)
+
+    if len(selectable_versions) <= 1:
+        version = selectable_versions[0] if selectable_versions else versions[0]
+        probe = probes.get(str(version.get("stream_id", "")))
+        line = _format_version_quality_line(
+            version, probe, category_map, show_ids=show_ids
+        )
+        st.info(t("version_option_suggested", line=line, name=version.get("name", "")))
+        for version in excluded_versions:
+            probe = probes.get(str(version.get("stream_id", "")))
+            line = _format_version_quality_line(
+                version, probe, category_map, show_ids=show_ids
+            )
+            st.caption(t("quality_line_excluded", quality=line, name=version.get("name", "")))
+        return version
+
+    choice_labels = [
+        _version_option_label(
+            version,
+            probes.get(str(version.get("stream_id", ""))),
+            category_map,
+            show_ids=show_ids,
+            suggested_id=suggested_id,
+        )
+        for version in selectable_versions
+    ]
+    default_version = suggested if suggested in selectable_versions else selectable_versions[0]
+    saved_id = st.session_state.get(choice_key)
+    default_index = 0
+    for idx, version in enumerate(selectable_versions):
+        if version.get("stream_id") == saved_id:
+            default_index = idx
+            break
+        if version.get("stream_id") == default_version.get("stream_id"):
+            default_index = idx
+
+    chosen_label = st.radio(
+        t("select_version"),
+        choice_labels,
+        index=default_index,
+        key=f"radio_version_{key}",
+        label_visibility="collapsed",
+    )
+    chosen_index = choice_labels.index(chosen_label)
+    chosen_version = selectable_versions[chosen_index]
+    st.session_state[choice_key] = chosen_version.get("stream_id")
+
+    for version in excluded_versions:
+        probe = probes.get(str(version.get("stream_id", "")))
+        line = _format_version_quality_line(
+            version, probe, category_map, show_ids=show_ids
+        )
+        st.caption(t("quality_line_excluded", quality=line, name=version.get("name", "")))
+
+    if chosen_version.get("stream_id") != suggested_id:
+        st.info(t("version_manual_override"))
+
+    return chosen_version
 
 
 def pick_item(items, names, label: str):
@@ -572,6 +809,11 @@ def render_auto_download_section() -> None:
             value=saved.get("prompt_delete_completed", True),
             help=t("prompt_delete_help"),
         )
+        allow_4k = st.checkbox(
+            t("include_4k"),
+            value=saved.get("allow_4k", False),
+            help=t("include_4k_help"),
+        )
         st.markdown(f"**{t('emby_section')}**")
         emby_enabled = st.checkbox(t("enable_emby"), value=saved.get("emby_enabled", False))
         emby_url = st.text_input(
@@ -653,6 +895,7 @@ def render_auto_download_section() -> None:
             "cooldown_seconds": int(cooldown),
             "poll_interval_seconds": int(poll_interval),
             "prompt_delete_completed": prompt_delete,
+            "allow_4k": allow_4k,
         }
         save_auto_download_config(config)
         st.success(t("auto_settings_saved"))
@@ -714,6 +957,17 @@ mode_labels = [t("mode_manual"), t("mode_auto")]
 selected_mode_label = st.sidebar.radio(t("mode_label"), mode_labels)
 mode_key = mode_keys[mode_labels.index(selected_mode_label)]
 
+quality_config = load_auto_download_config()
+if "allow_4k_setting" not in st.session_state:
+    st.session_state["allow_4k_setting"] = bool(quality_config.get("allow_4k", False))
+st.sidebar.checkbox(
+    t("include_4k"),
+    key="allow_4k_setting",
+    help=t("include_4k_help"),
+    on_change=save_allow_4k_setting,
+)
+allow_4k = bool(st.session_state.get("allow_4k_setting", False))
+
 if mode_key == "auto":
     config = load_auto_download_config()
     status = load_watcher_status()
@@ -733,8 +987,6 @@ selected_content_label = st.radio(t("content_type"), content_labels, key="conten
 content_key = content_keys[content_labels.index(selected_content_label)]
 
 process_pending_download()
-render_download_history_section()
-st.divider()
 
 with st.sidebar.expander(t("hidden_categories"), expanded=False):
     if st.button(t("load_categories"), key="load_hidden_categories"):
@@ -781,12 +1033,35 @@ if content_key == "movies":
         if cat_id is None:
             movies = exclude_hidden_items(movies, "vod")
         movies = filter_by_search(movies, search)
-        movies = sorted(movies, key=lambda m: m["name"].lower())
+        version_groups = group_catalog_versions(movies)
+        movies, total_versions = render_quality_catalog(movies, allow_4k)
+        category_map = {
+            str(category.get("category_id", "")): category.get("category_name", "")
+            for category in vod_cats_all
+        }
 
         st.caption(t("movies_found", count=len(movies)))
+        if total_versions > len(movies):
+            st.caption(
+                t(
+                    "quality_best_selected",
+                    count=len(movies),
+                    total=total_versions,
+                    allow_4k=t("quality_4k_included" if allow_4k else "quality_4k_excluded"),
+                )
+            )
         selected_movie = pick_item(movies, [m["name"] for m in movies], t("select_movie"))
 
         if selected_movie:
+            selected_movie = render_movie_available_qualities(
+                selected_movie,
+                version_groups,
+                allow_4k,
+                host,
+                user,
+                pw,
+                category_map,
+            )
             movie_name = selected_movie["name"]
             dest = st.selectbox(t("destination"), [DOWNLOAD_MOVIES_PATH], format_func=dest_label)
 
@@ -843,9 +1118,18 @@ else:
         if cat_id is None:
             series = exclude_hidden_items(series, "series")
         series = filter_by_search(series, search)
-        series = sorted(series, key=lambda s: s["name"].lower())
+        series, total_versions = render_quality_catalog(series, allow_4k)
 
         st.caption(t("series_found", count=len(series)))
+        if total_versions > len(series):
+            st.caption(
+                t(
+                    "quality_best_selected",
+                    count=len(series),
+                    total=total_versions,
+                    allow_4k=t("quality_4k_included" if allow_4k else "quality_4k_excluded"),
+                )
+            )
         selected_s = pick_item(series, [s["name"] for s in series], t("select_series"))
 
         if selected_s:
@@ -927,3 +1211,5 @@ else:
                                 st.warning(t("episodes_partial", ok=ok, total=total))
 
 render_deletion_prompts()
+st.divider()
+render_download_history_section()

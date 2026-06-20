@@ -1,0 +1,60 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+
+
+  <PropertyGroup>
+
+    <TargetFramework>net8.0</TargetFramework>
+
+    <RootNamespace>EmbyLibraryMerge</RootNamespace>
+
+    <AssemblyName>EmbyLibraryMerge</AssemblyName>
+
+    <LangVersion>latest</LangVersion>
+
+    <Nullable>enable</Nullable>
+
+    <ImplicitUsings>enable</ImplicitUsings>
+
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+
+  </PropertyGroup>
+
+
+
+  <ItemGroup>
+
+    <EmbeddedResource Include="Configuration\configPage.html" />
+
+    <Reference Include="MediaBrowser.Common">
+
+      <HintPath>lib\MediaBrowser.Common.dll</HintPath>
+
+      <Private>false</Private>
+
+    </Reference>
+
+    <Reference Include="MediaBrowser.Controller">
+
+      <HintPath>lib\MediaBrowser.Controller.dll</HintPath>
+
+      <Private>false</Private>
+
+    </Reference>
+
+    <Reference Include="MediaBrowser.Model">
+
+      <HintPath>lib\MediaBrowser.Model.dll</HintPath>
+
+      <Private>false</Private>
+
+    </Reference>
+
+  </ItemGroup>
+
+
+
+</Project>
+
+

@@ -1,0 +1,24 @@
+version: '2.3'
+services:
+  emby:
+    image: emby/embyserver:beta
+    container_name: embyserver
+    privileged: true
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      - UID=1000
+      - GID=1000
+      - TZ=Europe/Rome
+    volumes:
+      # Config Emby (cache, database, plugin)
+      - /var/lib/emby_config:/config
+
+      # mergerfs: HDD1 locale + m3u-editor strm in un solo albero
+      # Ordine branch: HDD1 vince se esiste lo stesso path
+      - /mnt/union/Movies:/data/movies
+      - /mnt/union/Serie_Tv:/data/tv
+    ports:
+      - 8096:8096
+      - 8920:8920
+    restart: unless-stopped

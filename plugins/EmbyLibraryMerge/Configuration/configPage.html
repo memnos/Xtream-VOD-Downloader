@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Library Merge</title>
+</head>
+<body>
+    <div id="libraryMergeConfigurationPage"
+         data-role="page"
+         class="page type-interior pluginConfigurationPage"
+         data-require="emby-input,emby-button,emby-checkbox">
+
+        <div data-role="content">
+            <div class="content-primary">
+                <form id="libraryMergeConfigurationForm">
+                    <h2>Library Merge</h2>
+                    <p class="fieldDescription">
+                        Unisce duplicati TMDB tra cartelle locali (MKV) e STRM.
+                        Dopo uno scan librerie: prima <strong>serie</strong>, poi <strong>ripara metadati</strong>.
+                    </p>
+
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label class="emby-checkbox-label">
+                            <input id="preferLocalMovies" type="checkbox" is="emby-checkbox" />
+                            <span>Preferisci path locali per i film (/data/movies)</span>
+                        </label>
+                    </div>
+
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label class="emby-checkbox-label">
+                            <input id="preferLocalSeries" type="checkbox" is="emby-checkbox" />
+                            <span>Preferisci path locali per le serie (/data/tv)</span>
+                        </label>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="excludedPaths">Escludi path (opzionale)</label>
+                        <input id="excludedPaths" name="ExcludedPathContains" type="text" is="emby-input"
+                               placeholder="es. /backup/, /temp/" />
+                        <div class="fieldDescription">Frammenti separati da virgola: serie/film il cui path contiene questi testi vengono ignorati.</div>
+                    </div>
+
+                    <div style="margin-top: 1.5em;">
+                        <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                            <span>Salva impostazioni</span>
+                        </button>
+                    </div>
+                </form>
+
+                <hr style="margin: 2em 0;" />
+
+                <h3>Azioni</h3>
+                <p id="taskStatus" class="fieldDescription">Caricamento task...</p>
+
+                <div style="display: flex; flex-wrap: wrap; gap: 0.75em; margin-top: 1em;">
+                    <button is="emby-button" type="button" class="raised emby-button" id="btnMergeMovies">
+                        Unisci film
+                    </button>
+                    <button is="emby-button" type="button" class="raised emby-button" id="btnMergeSeries">
+                        Unisci serie
+                    </button>
+                    <button is="emby-button" type="button" class="raised emby-button" id="btnFixSeries">
+                        Ripara metadati serie
+                    </button>
+                    <button is="emby-button" type="button" class="raised button-submit emby-button" id="btnMergeAllSeries">
+                        Serie: unisci + ripara
+                    </button>
+                </div>
+
+                <p class="fieldDescription" style="margin-top: 1em;">
+                    I task compaiono anche in <strong>Dashboard → Attività pianificate</strong> (categoria Library Merge).
+                </p>
+            </div>
+        </div>
+
+        <script type="text/javascript">
+            (function () {
+                var pluginId = '7c4e8f2a-9b1d-4e6a-8f3c-2d5a1b9e0c7f';
+                var taskKeys = {
+                    movies: 'EmbyLibraryMergeMovies',
+                    series: 'EmbyLibraryMergeSeries',
+                    fix: 'EmbyLibraryMergeFixSeries'
+                };
+                var taskIds = {};
+
+                function setStatus(text) {
+                    document.querySelector('#taskStatus').textContent = text;
+                }
+
+                function loadConfig() {
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                        document.querySelector('#preferLocalMovies').checked = config.PreferLocalMoviePaths !== false;
+                        document.querySelector('#preferLocalSeries').checked = config.PreferLocalSeriesPaths !== false;
+                        document.querySelector('#excludedPaths').value = config.ExcludedPathContains || '';
+                        Dashboard.hideLoadingMsg();
+                    });
+                }
+
+                function saveConfig(e) {
+                    if (e) {
+                        e.preventDefault();
+                    }
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                        config.PreferLocalMoviePaths = document.querySelector('#preferLocalMovies').checked;
+                        config.PreferLocalSeriesPaths = document.querySelector('#preferLocalSeries').checked;
+                        config.ExcludedPathContains = document.querySelector('#excludedPaths').value || '';
+                        return ApiClient.updatePluginConfiguration(pluginId, config);
+                    }).then(function (result) {
+                        Dashboard.processPluginConfigurationUpdateResult(result);
+                    });
+                    return false;
+                }
+
+                function loadTaskIds() {
+                    return ApiClient.ajax({
+                        type: 'GET',
+                        url: ApiClient.getUrl('ScheduledTasks')
+                    }).then(function (tasks) {
+                        taskIds = {};
+                        tasks.forEach(function (t) {
+                            if (t.Key === taskKeys.movies) taskIds.movies = t.Id;
+                            if (t.Key === taskKeys.series) taskIds.series = t.Id;
+                            if (t.Key === taskKeys.fix) taskIds.fix = t.Id;
+                        });
+                        if (!taskIds.movies && !taskIds.series && !taskIds.fix) {
+                            setStatus('Task non trovati. Riavvia Emby dopo installazione plugin.');
+                        } else {
+                            setStatus('Pronto. Clicca un pulsante per avviare un\'azione.');
+                        }
+                    });
+                }
+
+                function waitTask(taskId, label) {
+                    return new Promise(function (resolve, reject) {
+                        var attempts = 0;
+                        var timer = setInterval(function () {
+                            attempts++;
+                            ApiClient.ajax({
+                                type: 'GET',
+                                url: ApiClient.getUrl('ScheduledTasks/' + taskId)
+                            }).then(function (task) {
+                                var pct = task.CurrentProgressPercentage;
+                                var state = task.State || '';
+                                if (state === 'Running') {
+                                    setStatus(label + '… ' + (pct != null ? Math.round(pct) + '%' : ''));
+                                } else {
+                                    clearInterval(timer);
+                                    setStatus(label + ' completato.');
+                                    resolve();
+                                }
+                            }).catch(reject);
+                            if (attempts > 600) {
+                                clearInterval(timer);
+                                reject(new Error('Timeout'));
+                            }
+                        }, 1000);
+                    });
+                }
+
+                function runTask(keyName, label) {
+                    var id = taskIds[keyName];
+                    if (!id) {
+                        Dashboard.alert('Task non disponibile: ' + label);
+                        return Promise.reject();
+                    }
+                    setStatus('Avvio: ' + label + '…');
+                    return ApiClient.ajax({
+                        type: 'POST',
+                        url: ApiClient.getUrl('ScheduledTasks/Running/' + id)
+                    }).then(function () {
+                        return waitTask(id, label);
+                    });
+                }
+
+                document.querySelector('#libraryMergeConfigurationPage')
+                    .addEventListener('pageshow', function () {
+                        loadConfig();
+                        loadTaskIds();
+                    });
+
+                document.querySelector('#libraryMergeConfigurationForm')
+                    .addEventListener('submit', saveConfig);
+
+                document.querySelector('#btnMergeMovies').addEventListener('click', function () {
+                    runTask('movies', 'Unisci film').catch(function (e) {
+                        Dashboard.alert(e.message || 'Errore');
+                    });
+                });
+
+                document.querySelector('#btnMergeSeries').addEventListener('click', function () {
+                    runTask('series', 'Unisci serie').catch(function (e) {
+                        Dashboard.alert(e.message || 'Errore');
+                    });
+                });
+
+                document.querySelector('#btnFixSeries').addEventListener('click', function () {
+                    runTask('fix', 'Ripara metadati serie').catch(function (e) {
+                        Dashboard.alert(e.message || 'Errore');
+                    });
+                });
+
+                document.querySelector('#btnMergeAllSeries').addEventListener('click', function () {
+                    runTask('series', 'Unisci serie')
+                        .then(function () { return runTask('fix', 'Ripara metadati serie'); })
+                        .catch(function (e) {
+                            Dashboard.alert(e.message || 'Errore');
+                        });
+                });
+            })();
+        </script>
+    </div>
+</body>
+</html>

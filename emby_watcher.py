@@ -453,6 +453,7 @@ class AutoDownloadWatcher:
                     xtream_host=host,
                     xtream_user=xtream_user,
                     xtream_pw=xtream_pw,
+                    allow_4k=bool(config.get("allow_4k")),
                 )
                 self._maybe_prompt_series_deletion(
                     ended_session.client, ended_session.user_id, ended, config,
@@ -479,7 +480,14 @@ class AutoDownloadWatcher:
             item = self._queue.pop(0)
 
         dest_root = str(config.get("series_dest", ""))
-        prepared = self._prepare_download(item, dest_root, host, xtream_user, xtream_pw)
+        prepared = self._prepare_download(
+            item,
+            dest_root,
+            host,
+            xtream_user,
+            xtream_pw,
+            allow_4k=bool(config.get("allow_4k")),
+        )
         if prepared:
             self._start_download_thread(prepared)
 
@@ -557,6 +565,8 @@ class AutoDownloadWatcher:
         xtream_host: str,
         xtream_user: str,
         xtream_pw: str,
+        *,
+        allow_4k: bool = False,
     ) -> PausedDownload | None:
         match = None
         if item.strm_path:
@@ -565,6 +575,7 @@ class AutoDownloadWatcher:
             match = find_xtream_episode(
                 xtream_host, xtream_user, xtream_pw,
                 item.series_name, item.season, item.episode,
+                allow_4k=allow_4k,
             )
         if not match:
             self._log(f"Episodio non trovato su Xtream: {item.label}")
@@ -574,6 +585,7 @@ class AutoDownloadWatcher:
 
         _folder, output_file = build_episode_output(
             item.series_name, item.season, item.episode, match["ext"], dest_root,
+            strm_path=item.strm_path or None,
         )
         if os.path.exists(output_file):
             self._log(f"Già presente, salto: {item.label}")
@@ -712,6 +724,8 @@ class AutoDownloadWatcher:
         xtream_pw: str,
         season_i: int,
         episode_i: int,
+        *,
+        allow_4k: bool = False,
     ) -> dict | None:
         match = resolve_episode_from_strm_path(strm_path, xtream_host)
         if match:
@@ -720,6 +734,7 @@ class AutoDownloadWatcher:
             found = find_xtream_episode(
                 xtream_host, xtream_user, xtream_pw,
                 series_name, season_i, episode_i,
+                allow_4k=allow_4k,
             )
             if found:
                 return found
@@ -745,6 +760,8 @@ class AutoDownloadWatcher:
         xtream_host: str,
         xtream_user: str,
         xtream_pw: str,
+        *,
+        allow_4k: bool = False,
     ) -> int:
         seen: set[tuple[int, int]] = set()
         candidates: list[QueueItem] = []
@@ -752,6 +769,7 @@ class AutoDownloadWatcher:
             for ep in find_subsequent_xtream_episodes(
                 xtream_host, xtream_user, xtream_pw,
                 series_name, int(ended.season), int(ended.episode),
+                allow_4k=allow_4k,
             ):
                 key = (ep["season"], ep["episode"])
                 if key in seen:
@@ -781,6 +799,8 @@ class AutoDownloadWatcher:
         xtream_host: str,
         xtream_user: str,
         xtream_pw: str,
+        *,
+        allow_4k: bool = False,
     ) -> None:
         series_names = [ended.series_name]
         library_series_name = media.get_series_name(user_id, ended.series_id)
@@ -813,6 +833,7 @@ class AutoDownloadWatcher:
 
             xtream_match = self._resolve_xtream_match(
                 series_names, path, xtream_host, xtream_user, xtream_pw, season_i, episode_i,
+                allow_4k=allow_4k,
             )
             if not xtream_match:
                 stats["no_xtream"] += 1
@@ -820,6 +841,7 @@ class AutoDownloadWatcher:
 
             _folder, output_file = build_episode_output(
                 ended.series_name, season_i, episode_i, xtream_match["ext"], dest_root,
+                strm_path=path,
             )
             if os.path.exists(output_file):
                 stats["exists"] += 1
@@ -841,6 +863,7 @@ class AutoDownloadWatcher:
         if added == 0:
             added = self._enqueue_from_xtream_catalog(
                 ended, dest_root, series_names, xtream_host, xtream_user, xtream_pw,
+                allow_4k=allow_4k,
             )
             if added:
                 self._log(f"In coda {added} episodio/i da catalogo Xtream")

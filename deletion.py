@@ -3,7 +3,12 @@ import os
 import shutil
 from datetime import datetime
 
-from core import DATA_DIR, SERIES_DOWNLOAD_PATHS, load_json_file, sanitize_filename
+from core import (
+    DATA_DIR,
+    SERIES_DOWNLOAD_PATHS,
+    load_json_file,
+    resolve_series_folder_name,
+)
 
 DELETION_PROMPTS_FILE = os.environ.get(
     "DELETION_PROMPTS_FILE", os.path.join(DATA_DIR, "deletion_prompts.json")
@@ -50,7 +55,7 @@ def folder_has_video_files(folder: str) -> bool:
 
 
 def find_series_download_paths(series_name: str) -> list[str]:
-    safe_name = sanitize_filename(series_name)
+    safe_name = resolve_series_folder_name(series_name)
     if not safe_name:
         return []
     paths = []

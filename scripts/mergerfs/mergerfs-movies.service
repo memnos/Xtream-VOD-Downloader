@@ -1,0 +1,16 @@
+[Unit]
+Description=mergerfs Movies (HDD1 + m3u-editor strm)
+After=local-fs.target network-online.target
+Before=docker.service containerd.service mergerfs.target
+PartOf=mergerfs.target
+RequiresMountsFor=/mnt/wsl/HDD1
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do mountpoint -q /mnt/wsl/HDD1 && test -d /mnt/wsl/HDD1/Movies && exit 0; sleep 1; done; echo "HDD1 o Movies non pronti"; exit 1'
+ExecStart=/usr/bin/mergerfs -o allow_other,use_ino,category.create=ff,minfreespace=4G,fsname=mergerfs_Movies /mnt/wsl/HDD1/Movies:/home/fabio/m3u-editor/movies /mnt/union/Movies
+ExecStop=/usr/bin/fusermount3 -u /mnt/union/Movies
+
+[Install]
+WantedBy=multi-user.target mergerfs.target

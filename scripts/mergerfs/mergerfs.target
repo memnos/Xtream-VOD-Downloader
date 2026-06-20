@@ -1,0 +1,8 @@
+[Unit]
+Description=Union mount mergerfs (film + serie)
+Wants=mergerfs-movies.service mergerfs-series.service
+After=mergerfs-movies.service mergerfs-series.service
+Before=docker.service containerd.service
+
+[Install]
+WantedBy=multi-user.target

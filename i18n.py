@@ -164,6 +164,39 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "search_series_ph": "e.g. Breaking Bad, The Office...",
         "movies_found": "{count} movies found",
         "series_found": "{count} series found",
+        "include_4k": "Include 4K versions",
+        "include_4k_help": (
+            "When off, 4K/UHD/2160p entries are ignored and the best non-4K version "
+            "is selected automatically among duplicates."
+        ),
+        "quality_best_selected": (
+            "{count} titles shown ({total} versions in catalog — best quality auto-selected, {allow_4k})"
+        ),
+        "quality_4k_included": "4K included",
+        "quality_4k_excluded": "4K excluded",
+        "available_qualities": "Available qualities",
+        "quality_line_selected": "✓ **{quality}** — {name} *(selected for download)*",
+        "quality_line_suggested": "⭐ **{quality}** — {name} *(suggested)*",
+        "quality_line_available": "○ {quality} — {name}",
+        "quality_line_excluded": "○ {quality} — {name} *(4K disabled)*",
+        "quality_with_category": "{quality} · 📁 {category}",
+        "category_unknown": "Unknown category",
+        "reanalyze_quality": "🔄 Re-analyze",
+        "select_version": "Version for download",
+        "version_option": "{line} — {name}",
+        "version_option_suggested": "⭐ {line} — {name} *(suggested)*",
+        "version_suggested": "⭐ {label} *(suggested)*",
+        "version_excluded_4k": "{label} *(4K disabled)*",
+        "version_manual_override": "You selected a version different from the suggested one.",
+        "quality_probing": "Analyzing stream quality (~2 s per version)...",
+        "quality_probing_progress": "Analyzing version {current}/{total} (ID {stream_id})...",
+        "quality_probe_summary": (
+            "Probe done: {total} versions — {fresh} analyzed now, {cached} from cache, {failed} failed"
+        ),
+        "quality_versions_count": "{count} versions found for this title",
+        "quality_with_id": "ID {stream_id} · {quality}",
+        "quality_from_cache": "*(cache)*",
+        "quality_unknown": "Unknown",
         "select_movie": "Select movie",
         "select_series": "Select series",
         "destination": "Destination",
@@ -335,6 +368,40 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "search_series_ph": "Es. Breaking Bad, The Office...",
         "movies_found": "{count} film trovati",
         "series_found": "{count} serie trovate",
+        "include_4k": "Includi versioni 4K",
+        "include_4k_help": (
+            "Se disattivato, le voci 4K/UHD/2160p vengono ignorate e tra i duplicati "
+            "viene scelta automaticamente la migliore versione non 4K."
+        ),
+        "quality_best_selected": (
+            "{count} titoli mostrati ({total} versioni nel catalogo — miglior qualità "
+            "selezionata automaticamente, {allow_4k})"
+        ),
+        "quality_4k_included": "4K incluse",
+        "quality_4k_excluded": "4K escluse",
+        "available_qualities": "Qualità disponibili",
+        "quality_line_selected": "✓ **{quality}** — {name} *(selezionata per il download)*",
+        "quality_line_suggested": "⭐ **{quality}** — {name} *(consigliata)*",
+        "quality_line_available": "○ {quality} — {name}",
+        "quality_line_excluded": "○ {quality} — {name} *(4K disabilitato)*",
+        "quality_with_category": "{quality} · 📁 {category}",
+        "category_unknown": "Categoria sconosciuta",
+        "reanalyze_quality": "🔄 Rianalizza",
+        "select_version": "Versione da scaricare",
+        "version_option": "{line} — {name}",
+        "version_option_suggested": "⭐ {line} — {name} *(consigliata)*",
+        "version_suggested": "⭐ {label} *(consigliata)*",
+        "version_excluded_4k": "{label} *(4K disabilitato)*",
+        "version_manual_override": "Hai scelto una versione diversa da quella consigliata.",
+        "quality_probing": "Analisi qualità stream in corso (~2 s per versione)...",
+        "quality_probing_progress": "Analisi versione {current}/{total} (ID {stream_id})...",
+        "quality_probe_summary": (
+            "Analisi completata: {total} versioni — {fresh} analizzate ora, {cached} da cache, {failed} fallite"
+        ),
+        "quality_versions_count": "{count} versioni trovate per questo titolo",
+        "quality_with_id": "ID {stream_id} · {quality}",
+        "quality_from_cache": "*(cache)*",
+        "quality_unknown": "Sconosciuta",
         "select_movie": "Seleziona Film",
         "select_series": "Seleziona Serie",
         "destination": "Destinazione",

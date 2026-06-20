@@ -11,5 +11,6 @@
   "series_dest": "/download/tv",
   "cooldown_seconds": 90,
   "poll_interval_seconds": 20,
-  "prompt_delete_completed": true
+  "prompt_delete_completed": true,
+  "allow_4k": false
 }

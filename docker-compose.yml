@@ -12,10 +12,15 @@ services:
       - ${MOVIES_PATH:-./downloads/movies}:/download/movies
       - ${TV_PATH:-./downloads/tv}:/download/tv
       - ${TV2_PATH:-./downloads/tv2}:/download/tv-2
+      # Solo lettura: nomi cartelle allineati agli strm
+      - ${STRM_MOVIES_PATH:-./strm/movies}:/strm/movies:ro
+      - ${STRM_SERIES_PATH:-./strm/series}:/strm/series:ro
     environment:
       - TZ=${TZ:-UTC}
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
       - UI_LANG=${UI_LANG:-en}
+      - STRM_MOVIES_PATH=/strm/movies
+      - STRM_SERIES_PATH=/strm/series
       - STREAMLIT_SERVER_FILE_WATCHER_TYPE=none
     restart: unless-stopped
