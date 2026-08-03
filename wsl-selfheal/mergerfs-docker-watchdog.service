@@ -1,0 +1,7 @@
+[Unit]
+Description=Auto-riparazione union mergerfs + Docker
+After=docker.service mergerfs-movies.service mergerfs-series.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mergerfs-docker-healthcheck.sh

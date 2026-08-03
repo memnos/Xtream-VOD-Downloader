@@ -26,11 +26,7 @@ mkdir -p /etc/systemd/system/docker.service.d
 cp "${SCRIPT_DIR}/docker-mergerfs.conf" /etc/systemd/system/docker.service.d/mergerfs.conf
 systemctl daemon-reload
 systemctl enable mergerfs.target mergerfs-movies.service mergerfs-series.service
-if mountpoint -q /mnt/union/Movies && mountpoint -q /mnt/union/Serie_Tv; then
-  systemctl start mergerfs-movies.service mergerfs-series.service || true
-else
-  systemctl restart mergerfs-movies.service mergerfs-series.service
-fi
+systemctl restart mergerfs-movies.service mergerfs-series.service
 
 echo "--- mount ---"
 findmnt | grep -E 'union|mergerfs' || true

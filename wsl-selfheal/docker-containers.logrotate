@@ -1,0 +1,13 @@
+# Rotazione dei log dei container Docker (driver json-file).
+# Usa copytruncate: ruota i log dei container GIA' in esecuzione
+# senza doverli riavviare (Jellyfin compreso).
+/var/lib/docker/containers/*/*-json.log {
+    daily
+    rotate 7
+    maxsize 50M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}

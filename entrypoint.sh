@@ -4,12 +4,14 @@ set -eu
 PUID="${PUID:-1000}"
 PGID="${PGID:-1000}"
 
-# Fix ownership on bind mounts when the container runs as root.
+# Fix ownership on bind-mount roots only (not a recursive library walk).
+# Full chown/find over /download can take minutes on large HDD/WSL libraries and
+# blocked Streamlit startup; new files are fixed by finalize_download_path().
 if [ "$(id -u)" = "0" ]; then
-  mkdir -p /app/.data /download/movies /download/tv /download/tv-2
-  chown -R "${PUID}:${PGID}" /app/.data /download/movies /download/tv /download/tv-2 2>/dev/null || true
-  find /download -type d -exec chmod 777 {} + 2>/dev/null || true
-  find /download -type f -exec chmod 664 {} + 2>/dev/null || true
+  mkdir -p /app/.data /download/movies /download/tv
+  chown "${PUID}:${PGID}" /app/.data /download/movies /download/tv 2>/dev/null || true
+  chmod 777 /download/movies /download/tv 2>/dev/null || true
+  chmod 775 /app/.data 2>/dev/null || true
 fi
 
 python /app/watcher_daemon.py &

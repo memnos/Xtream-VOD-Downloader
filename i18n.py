@@ -45,13 +45,21 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "hidden_categories_saved": "Hidden categories updated.",
         "series_completed": "🗑️ Series completed",
         "series_completed_help": (
-            "You finished watching these series. Delete downloaded files from disk "
-            "(folders under /download/tv)? `.strm` files in the media library are not touched."
+            "You finished watching these series. Delete local downloads from disk "
+            "(folders under /download/tv)? Matching `.strm` files will be recreated "
+            "for those episodes and episode `.nfo` files will be realigned."
         ),
         "folders_to_delete": "{count} folder(s) to delete",
         "btn_delete_yes": "✅ Yes, delete from disk",
         "btn_delete_no": "❌ No, keep files",
+        "deleting_and_restoring_strm": "Deleting downloads and restoring .strm…",
         "deleted_series": "Deleted: {name}",
+        "deleted_series_restored": (
+            "Deleted {name}: {episodes} local episode(s) removed, "
+            "{created} .strm restored ({missing} missing on provider)."
+        ),
+        "restore_strm_errors": "STRM restore issues: {detail}",
+        "restore_strm_missing": "Episodes not found on provider: {detail}",
         "no_files_series": "No files found for: {name}",
         "recent_downloads": "**Recent downloads**",
         "no_downloads_yet": "No downloads recorded yet.",
@@ -139,12 +147,15 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "unlock_ui_help": "Clears pending downloads in this session",
         "mode_label": "Mode",
         "mode_manual": "Manual download",
+        "mode_strm": ".strm library",
+        "mode_duration": "Duration audit",
         "mode_auto": "Automatic download",
         "enter_creds": "Enter Xtream credentials in the sidebar to get started.",
         "content_type": "What do you want to download?",
         "content_movies": "Movies",
         "content_series": "TV series",
         "hidden_categories": "🙈 Hidden categories",
+        "hidden_count": "Currently hidden: {vod} movie · {series} series categories",
         "load_categories": "Load categories",
         "loading": "Loading...",
         "hide_movie_cats": "Hide movie categories",
@@ -209,11 +220,326 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "select_one_episode": "Select at least one episode.",
         "dest_movies": "Movies",
         "dest_tv": "TV series",
-        "dest_tv2": "TV series (drive 2)",
         "type_movie": "Movie",
         "type_series": "Series",
         "mode_manual_tag": "manual",
         "mode_auto_tag": "automatic",
+        "strm_sync_title": "📂 .strm library sync (Jellyfin / Emby)",
+        "strm_sync_help": (
+            "Generate or update `.strm` files from the Xtream catalog. "
+            "Each file contains the stream URL — Jellyfin/Emby plays directly from the provider. "
+            "Only changed files are rewritten; unchanged entries are skipped. "
+            "Output folders must be writable from the container (mount without `:ro`)."
+        ),
+        "strm_load_categories": "Load categories",
+        "strm_categories_loaded": "Loaded {vod} movie and {series} series categories. Select below, then save.",
+        "strm_categories_load_failed": "Could not load categories from the provider. Check credentials and try again.",
+        "strm_hidden_excluded": "Hidden categories excluded: {vod} movie · {series} series (manage in the sidebar)",
+        "strm_sync_movies": "Sync movies",
+        "strm_sync_series": "Sync TV series",
+        "strm_movies_output": "Movies output folder",
+        "strm_series_output": "Series output folder",
+        "strm_output_help": "Path inside the container, e.g. /strm/movies",
+        "strm_movie_categories": "Movie categories (empty = all visible)",
+        "strm_series_categories": "Series categories (empty = all visible)",
+        "strm_categories_help": "Leave empty to sync every category except hidden ones.",
+        "strm_categories_hint": "Press «Load categories» above to show the category lists and pick which ones to sync.",
+        "strm_series_source": "TV series episode source",
+        "strm_series_source_api": "Xtream API (one request per series)",
+        "strm_series_source_m3u": "M3U playlist (single provider request)",
+        "strm_series_source_m3u_api_fallback": "M3U playlist + API fallback",
+        "strm_series_source_help": (
+            "M3U greatly reduces provider requests because episode URLs are parsed locally "
+            "from the playlist. Fallback uses get_series_info only for series not found in M3U."
+        ),
+        "strm_update_existing": "Update existing .strm when URL changes",
+        "strm_update_existing_help": "If off, existing files are never overwritten.",
+        "strm_remove_missing": "Remove .strm no longer in catalog",
+        "strm_remove_missing_help": "Deletes orphan .strm files under the output folders.",
+        "strm_cleanup_min_ratio": "Cleanup safety threshold (%)",
+        "strm_cleanup_min_ratio_help": (
+            "When cleanup is enabled, skip deletions if this scan sees fewer expected .strm "
+            "than the selected percentage of files already present. Protects against empty/partial provider responses."
+        ),
+        "strm_tmdb_section": "TMDB matching (clean Jellyfin naming)",
+        "strm_use_tmdb": "Match titles with TMDB",
+        "strm_use_tmdb_help": (
+            "Renames folders to 'Title (Year) [tmdbid-12345]'. First run is slower "
+            "(one API call per title); results are cached in .data so later runs are fast."
+        ),
+        "strm_tmdb_api_key": "TMDB API key",
+        "strm_tmdb_api_key_help": "Defaults to the TMDB_API_KEY env var if set.",
+        "strm_tmdb_language": "TMDB language",
+        "strm_tmdb_language_help": "e.g. it-IT, en-US",
+        "strm_tmdb_rate_limit": "TMDB req / 10s",
+        "strm_tmdb_rate_limit_help": "Lower this if TMDB rate-limits you.",
+        "strm_tmdb_skip_unmatched_help": (
+            "Titles without a TMDB match are skipped (no .strm created). "
+            "Misses are cached for 7 days, then retried."
+        ),
+        "strm_filter_tmdb_episodes": "Only keep episodes that exist on TMDB",
+        "strm_filter_tmdb_episodes_help": (
+            "When TMDB matching is on, skip provider episodes outside TMDB season/episode "
+            "counts (e.g. Messiah S01E11 when TMDB only has 10). Also deletes existing "
+            "phantom .strm/.nfo. If TMDB season data is unavailable, episodes are kept."
+        ),
+        "strm_schedule_section": "Scheduled sync",
+        "strm_schedule_enabled": "Enable scheduled sync",
+        "strm_schedule_enabled_help": (
+            "Runs automatically in the background using saved Xtream credentials and these settings."
+        ),
+        "strm_schedule_mode": "Schedule type",
+        "strm_schedule_mode_interval": "Every N hours",
+        "strm_schedule_mode_daily": "Daily at fixed time",
+        "strm_schedule_interval_hours": "Interval (hours)",
+        "strm_schedule_interval_help": "Minimum 1 hour between automatic syncs.",
+        "strm_schedule_hour": "Hour (0–23)",
+        "strm_schedule_minute": "Minute (0–59)",
+        "strm_schedule_next": "Next scheduled sync: {time}",
+        "strm_schedule_last": "Last scheduled sync started: {time}",
+        "strm_schedule_pending": "Scheduler active — next run will be computed on save.",
+        "strm_settings_saved_schedule": "Settings saved. Next scheduled sync: {next_run}",
+        "strm_filter_section": "Exclusions",
+        "strm_exclude_adult": "Skip adult / pornographic content (auto)",
+        "strm_exclude_adult_help": (
+            "Skips items whose category or title matches adult patterns, and (with TMDB) "
+            "anything flagged adult by TMDB."
+        ),
+        "strm_exclude_terms": "Exclude titles containing (one per line)",
+        "strm_exclude_terms_help": "Case-insensitive. A title matching any term is skipped.",
+        "strm_adult_terms": "Adult terms (one per line)",
+        "strm_adult_terms_help": "Used when 'Skip adult content' is on. Edit to taste.",
+        "strm_refresh_section": "After sync",
+        "strm_refresh_emby": "Refresh Emby library",
+        "strm_refresh_jellyfin": "Refresh Jellyfin library",
+        "strm_refresh_disabled_hint": (
+            "Enable Emby or Jellyfin in automatic download settings to refresh libraries after sync."
+        ),
+        "strm_save_settings": "💾 Save settings",
+        "strm_sync_now": "🚀 Sync now",
+        "strm_settings_saved": "STRM sync settings saved.",
+        "strm_nothing_selected": "Select at least movies or series to sync.",
+        "strm_already_running": "A sync is already running.",
+        "strm_sync_started": "STRM sync started in background.",
+        "strm_duration_audit_title": "Movie duration audit",
+        "strm_duration_audit_help": (
+            "Probe each movie .strm (full media info: duration, codec, resolution, audio) "
+            "and compare duration to TMDB runtime. Already-checked movies are skipped. "
+            "Probe failures are deleted only after batches of 100 probes, and only if the "
+            "batch had successful probes (provider outage protection). Broken streams are "
+            "discarded so sync will not recreate them unless the provider file changes; "
+            "other catalog versions are tried as replacements. Streams without Italian "
+            "audio (when language tags are conclusive) are removed; if a local file "
+            "exists, only the .strm and matching sidecars are deleted. Auto-pauses while Emby/Jellyfin "
+            "is playing and resumes after 5 minutes idle. Probed media can later be "
+            "pushed to Jellyfin."
+        ),
+        "strm_duration_threshold": "Mismatch threshold (minutes)",
+        "strm_duration_workers": "Parallel probes",
+        "strm_duration_workers_help": (
+            "Fixed to 1: the provider allows only one concurrent stream/download."
+        ),
+        "strm_duration_force_rescan": "Force full rescan",
+        "strm_duration_force_rescan_help": (
+            "Clear previous results and probe every movie again."
+        ),
+        "strm_duration_audit_now": "🔍 Audit movie durations",
+        "strm_duration_audit_stop": "⏹ Stop audit",
+        "strm_duration_audit_stopped": "Duration audit stop requested.",
+        "strm_duration_audit_not_running": "No duration audit is running.",
+        "strm_duration_audit_started": "Duration audit started in background.",
+        "strm_duration_already_running": "A duration audit is already running.",
+        "strm_duration_need_tmdb": "Configure a TMDB API key in STRM sync settings first.",
+        "strm_duration_status_title": "Duration audit status",
+        "strm_duration_metric_checked": "Stored",
+        "strm_duration_metric_skipped": "Skipped",
+        "strm_duration_metric_ok": "OK",
+        "strm_duration_metric_mismatch": "Mismatch",
+        "strm_duration_metric_probe_failed": "Probe failed",
+        "strm_duration_metric_no_runtime": "No TMDB runtime",
+        "strm_duration_metric_deleted": "Deleted",
+        "strm_duration_current": "Current: {title}",
+        "strm_duration_heartbeat_ok": "Alive — last progress {seconds}s ago",
+        "strm_duration_heartbeat_slow": "Slow — no progress for {seconds}s (probe may be hanging)",
+        "strm_duration_heartbeat_stale": "STUCK — no progress for {seconds}s",
+        "strm_duration_heartbeat_none": "Running but no heartbeat yet",
+        "strm_duration_heartbeat_last": "Last heartbeat: {time} ({seconds}s ago)",
+        "strm_duration_last_run": "Last audit: {time}",
+        "strm_duration_stored": "Results stored: {count}",
+        "strm_duration_errors_title": "Duration errors ({count})",
+        "strm_duration_errors_empty": "No duration errors recorded yet.",
+        "strm_duration_col_title": "Title",
+        "strm_duration_col_tmdb": "TMDB",
+        "strm_duration_col_runtime": "TMDB runtime",
+        "strm_duration_col_probed": "Probed",
+        "strm_duration_col_delta": "Delta",
+        "strm_duration_col_reason": "Reason",
+        "strm_jf_push_title": "Push media info to Jellyfin",
+        "strm_jf_push_help": (
+            "Sends probed duration/codec/resolution/audio to Jellyfin via the "
+            "STRM Media Import plugin — without probing the provider again. "
+            "Already-pushed items (same media fingerprint) are skipped."
+        ),
+        "strm_jf_movies_root": "Jellyfin movies path",
+        "strm_jf_movies_root_help": "Path inside Jellyfin container, e.g. /media/movies",
+        "strm_jf_force_repush": "Force re-push everything",
+        "strm_jf_force_repush_help": "Ignore previous push fingerprints and send all items again.",
+        "strm_jf_push_now": "📤 Push to Jellyfin",
+        "strm_jf_push_started": "Jellyfin push started.",
+        "strm_jf_push_already_running": "A Jellyfin push is already running.",
+        "strm_jf_push_status_title": "Jellyfin push status",
+        "strm_jf_metric_applied": "Applied",
+        "strm_jf_metric_missing": "Not found in JF",
+        "strm_jf_metric_failed": "Failed",
+        "strm_jf_metric_skipped": "No media yet",
+        "strm_jf_metric_skipped_already": "Already pushed",
+        "strm_jf_push_log": "Push log",
+        "strm_mismatch_resolve_title": "Mismatch recognition (TMDB)",
+        "strm_mismatch_resolve_help": (
+            "Uses the Xtream VOD provider title (get_vod_info) + probed duration to find "
+            "alternate TMDB IDs. Folder year/NFO/current tmdbid are ignored as untrusted. "
+            "Analysis only until you apply."
+        ),
+        "strm_mismatch_resolve_limit": "Sample size (0 = all)",
+        "strm_mismatch_resolve_limit_help": "Analyze the N largest |delta| mismatches first.",
+        "strm_mismatch_resolve_now": "🔎 Analyze mismatches",
+        "strm_mismatch_resolve_started": "Mismatch analysis started.",
+        "strm_mismatch_resolve_already_running": "Mismatch analysis is already running.",
+        "strm_mismatch_resolve_status_title": "Mismatch analysis status",
+        "strm_mismatch_metric_checked": "Checked",
+        "strm_mismatch_metric_candidates": "With candidate",
+        "strm_mismatch_metric_none": "No candidate",
+        "strm_mismatch_resolve_log": "Mismatch analysis log",
+        "strm_mismatch_candidates_title": "Possible wrong TMDB IDs ({count})",
+        "strm_mismatch_col_provider": "Provider title",
+        "strm_mismatch_col_current": "Current TMDB",
+        "strm_mismatch_col_alt": "Alt TMDB",
+        "strm_mismatch_col_alt_title": "Alt title",
+        "strm_mismatch_col_alt_runtime": "Alt runtime",
+        "strm_mismatch_col_sim": "Title sim",
+        "strm_mismatch_col_ready": "Ready",
+        "strm_mismatch_col_applied": "Applied",
+        "strm_mismatch_apply_title": "Apply retags on disk",
+        "strm_mismatch_apply_help": (
+            "Renames folder/.strm, rewrites .nfo with the correct tmdbid, deletes old images, "
+            "updates the audit store, notifies Jellyfin (path deleted/created + metadata refresh) "
+            "and re-pushes media info. Only high-confidence candidates (Ready)."
+        ),
+        "strm_mismatch_apply_min_sim": "Minimum title similarity to apply",
+        "strm_mismatch_apply_now": "✍️ Apply ready retags ({count})",
+        "strm_mismatch_apply_started": "Retag apply started.",
+        "strm_mismatch_apply_already_running": "Retag apply is already running.",
+        "strm_mismatch_apply_status_title": "Apply status",
+        "strm_mismatch_metric_applied": "Applied",
+        "strm_mismatch_metric_skipped_apply": "Skipped",
+        "strm_mismatch_metric_failed_apply": "Failed",
+        "strm_mismatch_apply_log": "Apply log",
+        "strm_status_title": "Sync status",
+        "strm_status_running": "running",
+        "strm_status_paused": "paused",
+        "strm_status_idle": "idle",
+        "strm_metric_movies_created": "Movies created",
+        "strm_metric_movies_updated": "Movies updated",
+        "strm_metric_series_created": "Series created",
+        "strm_metric_series_updated": "Series updated",
+        "strm_metric_episodes_created": "Episodes created",
+        "strm_metric_episodes_updated": "Episodes updated",
+        "strm_status_summary": (
+            "Skipped: {skipped_movies} movies, {skipped_episodes} episodes · "
+            "Removed: {removed_movies} movies, {removed_episodes} episodes"
+        ),
+        "strm_status_filter_summary": (
+            "Excluded: {movies_excluded} movies, {series_excluded} series · "
+            "No TMDB match: {movies_unmatched} movies, {series_unmatched} series"
+        ),
+        "strm_status_tmdb_episodes_filtered": (
+            "TMDB episode filter: {count} phantom episodes skipped/removed"
+        ),
+        "strm_status_tmdb_summary": "TMDB: {lookups} lookups, {cache_hits} cache hits",
+        "strm_status_item_errors": "Skipped due to provider errors — movies: {movies}, series: {series}",
+        "strm_status_cleanup_skipped": "Cleanup skipped by safety guard: provider response looked incomplete.",
+        "strm_status_series_source": (
+            "Series source: {from_m3u} from M3U · {from_api} via API fallback · "
+            "{missing} not found in M3U"
+        ),
+        "strm_last_sync": "Last completed sync: {time}",
+        "strm_sync_summary_title": "Last sync summary",
+        "strm_sync_summary_movies": (
+            "Movies ({duration}): {created} created, {updated} updated, "
+            "{skipped} skipped, {excluded} excluded, {unmatched} no TMDB match, "
+            "{errors} errors{removed_suffix}"
+        ),
+        "strm_sync_summary_series": (
+            "Series ({duration}): {series_created} series created, {series_updated} series updated · "
+            "{created} episodes created, {updated} updated, "
+            "{skipped} skipped, {excluded} series excluded, {unmatched} no TMDB match, "
+            "{errors} errors{removed_suffix}"
+        ),
+        "strm_sync_summary_total": "Total time: {duration}",
+        "strm_sync_summary_removed_movies": ", {count} removed",
+        "strm_sync_summary_removed_episodes": ", {count} episodes removed",
+        "strm_log": "Sync log",
+        "strm_promote_title": "📦 Promote test library → working folder",
+        "strm_promote_help": (
+            "Move generated .strm (and .nfo) from a test folder into the working folder, "
+            "keeping the structure. TMDB cache persists, so nothing is recomputed."
+        ),
+        "strm_promote_src": "Source movies folder (test)",
+        "strm_promote_src_series": "Source series folder (test)",
+        "strm_promote_dst": "Destination movies folder (working)",
+        "strm_promote_dst_series": "Destination series folder (working)",
+        "strm_promote_button": "📦 Move test → working",
+        "strm_promote_same_path": "Source and destination are identical: {path}",
+        "strm_promote_done": "Moved {moved} file(s).",
+        "strm_recent_title": "Recently added after STRM sync",
+        "strm_recent_help": (
+            "Titles sorted by newest .strm file date (newest first). "
+            "Separate tables for movies and series."
+        ),
+        "strm_recent_limit": "How many titles per table",
+        "strm_recent_movies_table": "Movies",
+        "strm_recent_series_table": "Series",
+        "strm_recent_col_date": "Added",
+        "strm_recent_col_title": "Title",
+        "strm_recent_col_files": ".strm files",
+        "strm_recent_empty_movies": "No movie folders found in the STRM output path.",
+        "strm_recent_empty_series": "No series folders found in the STRM output path.",
+        "strm_complete_title": "Complete seasons",
+        "strm_complete_help": (
+            "Phase 1: seasons complete on disk with at least one JF play — cumulative history. "
+            "Phase 2: only seasons that received newly created .strm files; when a new episode "
+            "completes a season, it is added to a separate list. Runs after each STRM sync."
+        ),
+        "strm_complete_refresh": "Refresh season analysis",
+        "strm_complete_started": "Season analysis started in background.",
+        "strm_complete_already_running": "Season analysis is already running.",
+        "strm_complete_running": "Season analysis in progress…",
+        "strm_complete_never": "No analysis yet — click refresh (or wait for next sync).",
+        "strm_complete_updated": (
+            "Last analysis: {time} · JF history {watched} (+{added}) · "
+            "completed by new eps {by_new} (+{by_new_added})"
+        ),
+        "strm_complete_phase2_table": "Completed by new episodes",
+        "strm_complete_phase2_help": (
+            "Seasons that became complete when new .strm files were created. "
+            "Independent from the JF-watched history."
+        ),
+        "strm_complete_phase2_empty": "No seasons completed by new episodes yet.",
+        "strm_complete_phase2_new_table": "Newly completed by new episodes (this run)",
+        "strm_complete_phase2_new_help": "Seasons completed by new downloads in the latest analysis.",
+        "strm_complete_new_table": "New in JF-watched history (this run)",
+        "strm_complete_new_help": "Seasons that entered the JF-watched history in the latest analysis.",
+        "strm_complete_watched_table": "History — complete + watched on JF",
+        "strm_complete_watched_help": (
+            "Cumulative list. Sorted by first detection date (newest first)."
+        ),
+        "strm_complete_watched_empty": "No complete seasons with JF watch in history yet.",
+        "strm_complete_col_title": "Title",
+        "strm_complete_col_season": "Season",
+        "strm_complete_col_episodes": "Episodes",
+        "strm_complete_col_updated": "Files updated",
+        "strm_complete_col_first_seen": "Added to list",
+        "strm_complete_log": "Season analysis log",
         "series_default": "Series",
     },
     "it": {
@@ -249,13 +575,21 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "hidden_categories_saved": "Categorie nascoste aggiornate.",
         "series_completed": "🗑️ Serie completata",
         "series_completed_help": (
-            "Hai finito di guardare queste serie. Vuoi eliminare dal disco i file scaricati "
-            "(le cartelle in /download/tv)? Gli `.strm` in libreria non vengono toccati."
+            "Hai finito di guardare queste serie. Vuoi eliminare dal disco i download locali "
+            "(cartelle in /download/tv)? Per quegli episodi verranno ricreati gli `.strm` "
+            "e riallineati gli `.nfo`."
         ),
         "folders_to_delete": "{count} cartella/e da eliminare",
         "btn_delete_yes": "✅ Sì, elimina dal disco",
         "btn_delete_no": "❌ No, mantieni i file",
+        "deleting_and_restoring_strm": "Eliminazione download e ripristino .strm…",
         "deleted_series": "Eliminata: {name}",
+        "deleted_series_restored": (
+            "Eliminata {name}: {episodes} episodio/i locali rimossi, "
+            "{created} .strm ripristinati ({missing} assenti sul provider)."
+        ),
+        "restore_strm_errors": "Problemi ripristino STRM: {detail}",
+        "restore_strm_missing": "Episodi non trovati sul provider: {detail}",
         "no_files_series": "Nessun file trovato per: {name}",
         "recent_downloads": "**Ultimi download**",
         "no_downloads_yet": "Nessun download registrato ancora.",
@@ -343,12 +677,15 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "unlock_ui_help": "Cancella download in sospeso nella sessione",
         "mode_label": "Modalità",
         "mode_manual": "Download manuale",
+        "mode_strm": "Libreria .strm",
+        "mode_duration": "Audit durata",
         "mode_auto": "Download automatico",
         "enter_creds": "Inserisci le credenziali Xtream nella barra laterale per iniziare.",
         "content_type": "Cosa vuoi scaricare?",
         "content_movies": "Film",
         "content_series": "Serie TV",
         "hidden_categories": "🙈 Categorie nascoste",
+        "hidden_count": "Attualmente nascoste: {vod} categorie film · {series} categorie serie",
         "load_categories": "Carica categorie",
         "loading": "Caricamento...",
         "hide_movie_cats": "Nascondi categorie film",
@@ -414,11 +751,327 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "select_one_episode": "Seleziona almeno un episodio.",
         "dest_movies": "Film",
         "dest_tv": "Serie TV",
-        "dest_tv2": "Serie TV (HDD2)",
         "type_movie": "Film",
         "type_series": "Serie",
         "mode_manual_tag": "manuale",
         "mode_auto_tag": "automatico",
+        "strm_sync_title": "📂 Sincronizzazione libreria .strm (Jellyfin / Emby)",
+        "strm_sync_help": (
+            "Genera o aggiorna file `.strm` dal catalogo Xtream. "
+            "Ogni file contiene l'URL dello stream — Jellyfin/Emby riproduce direttamente dal provider. "
+            "Vengono riscritti solo i file cambiati; quelli invariati vengono saltati. "
+            "Le cartelle di output devono essere scrivibili dal container (mount senza `:ro`)."
+        ),
+        "strm_load_categories": "Carica categorie",
+        "strm_categories_loaded": "Caricate {vod} categorie film e {series} serie. Seleziona sotto, poi salva.",
+        "strm_categories_load_failed": "Impossibile caricare le categorie dal provider. Controlla le credenziali e riprova.",
+        "strm_hidden_excluded": "Categorie nascoste escluse: {vod} film · {series} serie (gestisci nella sidebar)",
+        "strm_sync_movies": "Sincronizza film",
+        "strm_sync_series": "Sincronizza serie TV",
+        "strm_movies_output": "Cartella output film",
+        "strm_series_output": "Cartella output serie",
+        "strm_output_help": "Percorso nel container, es. /strm/movies",
+        "strm_movie_categories": "Categorie film (vuoto = tutte le visibili)",
+        "strm_series_categories": "Categorie serie (vuoto = tutte le visibili)",
+        "strm_categories_help": "Lascia vuoto per sincronizzare tutte le categorie tranne quelle nascoste.",
+        "strm_categories_hint": "Premi «Carica categorie» qui sopra per vedere gli elenchi e scegliere quali sincronizzare.",
+        "strm_series_source": "Sorgente episodi serie TV",
+        "strm_series_source_api": "API Xtream (una richiesta per serie)",
+        "strm_series_source_m3u": "Playlist M3U (una sola richiesta al provider)",
+        "strm_series_source_m3u_api_fallback": "Playlist M3U + fallback API",
+        "strm_series_source_help": (
+            "M3U riduce molto le richieste al provider perché gli URL episodi vengono letti "
+            "localmente dalla playlist. Il fallback usa get_series_info solo per le serie non trovate nell'M3U."
+        ),
+        "strm_update_existing": "Aggiorna .strm esistenti se l'URL cambia",
+        "strm_update_existing_help": "Se disattivato, i file esistenti non vengono mai sovrascritti.",
+        "strm_remove_missing": "Rimuovi .strm non più nel catalogo",
+        "strm_remove_missing_help": "Elimina file .strm orfani nelle cartelle di output.",
+        "strm_cleanup_min_ratio": "Soglia sicurezza cleanup (%)",
+        "strm_cleanup_min_ratio_help": (
+            "Quando il cleanup è attivo, salta le cancellazioni se questa scansione vede meno .strm attesi "
+            "della percentuale scelta rispetto ai file già presenti. Protegge da risposte provider vuote o parziali."
+        ),
+        "strm_tmdb_section": "Abbinamento TMDB (naming pulito per Jellyfin)",
+        "strm_use_tmdb": "Abbina i titoli con TMDB",
+        "strm_use_tmdb_help": (
+            "Rinomina le cartelle in 'Titolo (Anno) [tmdbid-12345]'. Il primo giro è più lento "
+            "(una chiamata API per titolo); i risultati restano in cache in .data, i giri successivi sono veloci."
+        ),
+        "strm_tmdb_api_key": "API key TMDB",
+        "strm_tmdb_api_key_help": "Usa di default la variabile d'ambiente TMDB_API_KEY se impostata.",
+        "strm_tmdb_language": "Lingua TMDB",
+        "strm_tmdb_language_help": "es. it-IT, en-US",
+        "strm_tmdb_rate_limit": "Richieste TMDB / 10s",
+        "strm_tmdb_rate_limit_help": "Abbassa se TMDB ti limita.",
+        "strm_tmdb_skip_unmatched_help": (
+            "I titoli senza match TMDB vengono saltati (nessun .strm). "
+            "I miss restano in cache 7 giorni, poi vengono riprovati."
+        ),
+        "strm_filter_tmdb_episodes": "Tieni solo episodi presenti su TMDB",
+        "strm_filter_tmdb_episodes_help": (
+            "Con abbinamento TMDB attivo, salta gli episodi del provider fuori dal "
+            "conteggio stagioni/episodi TMDB (es. Messiah S01E11 se TMDB ne ha 10). "
+            "Elimina anche .strm/.nfo fantasma già presenti. Se i dati stagione TMDB "
+            "non sono disponibili, gli episodi vengono mantenuti."
+        ),
+        "strm_schedule_section": "Sync programmata",
+        "strm_schedule_enabled": "Abilita sync automatica",
+        "strm_schedule_enabled_help": (
+            "Esegue in background con le credenziali Xtream salvate e queste impostazioni."
+        ),
+        "strm_schedule_mode": "Tipo di programmazione",
+        "strm_schedule_mode_interval": "Ogni N ore",
+        "strm_schedule_mode_daily": "Ogni giorno a orario fisso",
+        "strm_schedule_interval_hours": "Intervallo (ore)",
+        "strm_schedule_interval_help": "Minimo 1 ora tra una sync automatica e l'altra.",
+        "strm_schedule_hour": "Ora (0–23)",
+        "strm_schedule_minute": "Minuto (0–59)",
+        "strm_schedule_next": "Prossima sync programmata: {time}",
+        "strm_schedule_last": "Ultima sync programmata avviata: {time}",
+        "strm_schedule_pending": "Scheduler attivo — la prossima esecuzione viene calcolata al salvataggio.",
+        "strm_settings_saved_schedule": "Impostazioni salvate. Prossima sync: {next_run}",
+        "strm_filter_section": "Esclusioni",
+        "strm_exclude_adult": "Escludi contenuti per adulti / pornografici (auto)",
+        "strm_exclude_adult_help": (
+            "Salta gli elementi la cui categoria o titolo corrisponde a pattern per adulti e (con TMDB) "
+            "tutto ciò che TMDB segnala come adult."
+        ),
+        "strm_exclude_terms": "Escludi titoli che contengono (uno per riga)",
+        "strm_exclude_terms_help": "Maiuscole/minuscole ignorate. Un titolo che contiene un termine viene saltato.",
+        "strm_adult_terms": "Termini per adulti (uno per riga)",
+        "strm_adult_terms_help": "Usati quando 'Escludi contenuti per adulti' è attivo. Modificabili.",
+        "strm_refresh_section": "Dopo la sync",
+        "strm_refresh_emby": "Aggiorna libreria Emby",
+        "strm_refresh_jellyfin": "Aggiorna libreria Jellyfin",
+        "strm_refresh_disabled_hint": (
+            "Abilita Emby o Jellyfin nelle impostazioni del download automatico per aggiornare le librerie."
+        ),
+        "strm_save_settings": "💾 Salva impostazioni",
+        "strm_sync_now": "🚀 Sincronizza ora",
+        "strm_settings_saved": "Impostazioni sync STRM salvate.",
+        "strm_nothing_selected": "Seleziona almeno film o serie da sincronizzare.",
+        "strm_already_running": "Una sincronizzazione è già in corso.",
+        "strm_sync_started": "Sync STRM avviata in background.",
+        "strm_duration_audit_title": "Audit durata film",
+        "strm_duration_audit_help": (
+            "Sonda ogni .strm film (media info completa: durata, codec, risoluzione, audio) "
+            "e confronta la durata con il runtime TMDB. I già controllati vengono saltati. "
+            "I probe falliti vengono eliminati solo dopo batch di 100 probe, e solo se nel "
+            "batch c’è almeno un successo (protezione da outage del provider). Gli stream "
+            "rotti vengono scartati così il sync non li ricrea finché il file del provider "
+            "non cambia; si provano altre versioni del catalogo come sostituto. Gli stream "
+            "senza audio italiano (se i tag lingua sono chiari) vengono rimossi; se esiste "
+            "un file locale si cancellano solo .strm e sidecar abbinati. Si mette in pausa se Emby/Jellyfin "
+            "sta riproducendo qualcosa e riprende dopo 5 minuti di idle. I dati sondati si "
+            "possono poi inviare a Jellyfin."
+        ),
+        "strm_duration_threshold": "Soglia mismatch (minuti)",
+        "strm_duration_workers": "Probe in parallelo",
+        "strm_duration_workers_help": (
+            "Fissato a 1: il fornitore consente un solo stream/download alla volta."
+        ),
+        "strm_duration_force_rescan": "Forza rescan completo",
+        "strm_duration_force_rescan_help": (
+            "Cancella i risultati precedenti e sonda di nuovo tutti i film."
+        ),
+        "strm_duration_audit_now": "🔍 Audit durata film",
+        "strm_duration_audit_stop": "⏹ Ferma audit",
+        "strm_duration_audit_stopped": "Richiesta di stop audit inviata.",
+        "strm_duration_audit_not_running": "Nessun audit durata in esecuzione.",
+        "strm_duration_audit_started": "Audit durata avviato in background.",
+        "strm_duration_already_running": "Un audit durata è già in esecuzione.",
+        "strm_duration_need_tmdb": "Configura prima la TMDB API key nelle impostazioni STRM sync.",
+        "strm_duration_status_title": "Stato audit durata",
+        "strm_duration_metric_checked": "Salvati",
+        "strm_duration_metric_skipped": "Saltati",
+        "strm_duration_metric_ok": "OK",
+        "strm_duration_metric_mismatch": "Mismatch",
+        "strm_duration_metric_probe_failed": "Probe falliti",
+        "strm_duration_metric_no_runtime": "Senza runtime TMDB",
+        "strm_duration_metric_deleted": "Eliminati",
+        "strm_duration_current": "In corso: {title}",
+        "strm_duration_heartbeat_ok": "Vivo — ultimo avanzamento {seconds}s fa",
+        "strm_duration_heartbeat_slow": "Lento — nessun avanzamento da {seconds}s (probe forse bloccato)",
+        "strm_duration_heartbeat_stale": "FERMO — nessun avanzamento da {seconds}s",
+        "strm_duration_heartbeat_none": "In esecuzione ma ancora senza heartbeat",
+        "strm_duration_heartbeat_last": "Ultimo heartbeat: {time} ({seconds}s fa)",
+        "strm_duration_last_run": "Ultimo audit: {time}",
+        "strm_duration_stored": "Risultati salvati: {count}",
+        "strm_duration_errors_title": "Errori durata ({count})",
+        "strm_duration_errors_empty": "Nessun errore durata registrato ancora.",
+        "strm_duration_col_title": "Titolo",
+        "strm_duration_col_tmdb": "TMDB",
+        "strm_duration_col_runtime": "Runtime TMDB",
+        "strm_duration_col_probed": "Sondato",
+        "strm_duration_col_delta": "Delta",
+        "strm_duration_col_reason": "Motivo",
+        "strm_jf_push_title": "Invia media info a Jellyfin",
+        "strm_jf_push_help": (
+            "Invia durata/codec/risoluzione/audio già sondati a Jellyfin tramite il "
+            "plugin STRM Media Import — senza riprobe sul provider. "
+            "Gli item già inviati (stesso fingerprint media) vengono saltati."
+        ),
+        "strm_jf_movies_root": "Path film in Jellyfin",
+        "strm_jf_movies_root_help": "Percorso nel container Jellyfin, es. /media/movies",
+        "strm_jf_force_repush": "Forza re-invio di tutto",
+        "strm_jf_force_repush_help": "Ignora i fingerprint già inviati e manda di nuovo tutti gli item.",
+        "strm_jf_push_now": "📤 Invia a Jellyfin",
+        "strm_jf_push_started": "Push verso Jellyfin avviato.",
+        "strm_jf_push_already_running": "Un push Jellyfin è già in esecuzione.",
+        "strm_jf_push_status_title": "Stato push Jellyfin",
+        "strm_jf_metric_applied": "Applicati",
+        "strm_jf_metric_missing": "Non trovati in JF",
+        "strm_jf_metric_failed": "Falliti",
+        "strm_jf_metric_skipped": "Senza media ancora",
+        "strm_jf_metric_skipped_already": "Già inviati",
+        "strm_jf_push_log": "Log push",
+        "strm_mismatch_resolve_title": "Riconoscimento mismatch (TMDB)",
+        "strm_mismatch_resolve_help": (
+            "Usa il titolo provider Xtream (get_vod_info) + durata sondata per trovare "
+            "TMDB alternativi. Anno cartella/NFO/tmdbid attuale sono ignorati (non affidabili). "
+            "Solo analisi finché non applichi."
+        ),
+        "strm_mismatch_resolve_limit": "Campione (0 = tutti)",
+        "strm_mismatch_resolve_limit_help": "Analizza prima gli N mismatch con |delta| più grande.",
+        "strm_mismatch_resolve_now": "🔎 Analizza mismatch",
+        "strm_mismatch_resolve_started": "Analisi mismatch avviata.",
+        "strm_mismatch_resolve_already_running": "Analisi mismatch già in esecuzione.",
+        "strm_mismatch_resolve_status_title": "Stato analisi mismatch",
+        "strm_mismatch_metric_checked": "Controllati",
+        "strm_mismatch_metric_candidates": "Con candidato",
+        "strm_mismatch_metric_none": "Senza candidato",
+        "strm_mismatch_resolve_log": "Log analisi mismatch",
+        "strm_mismatch_candidates_title": "Possibili TMDB errati ({count})",
+        "strm_mismatch_col_provider": "Titolo provider",
+        "strm_mismatch_col_current": "TMDB attuale",
+        "strm_mismatch_col_alt": "TMDB alt",
+        "strm_mismatch_col_alt_title": "Titolo alt",
+        "strm_mismatch_col_alt_runtime": "Runtime alt",
+        "strm_mismatch_col_sim": "Sim titolo",
+        "strm_mismatch_col_ready": "Pronto",
+        "strm_mismatch_col_applied": "Applicato",
+        "strm_mismatch_apply_title": "Applica retag su disco",
+        "strm_mismatch_apply_help": (
+            "Rinomina cartella/.strm, riscrive il .nfo con il tmdbid corretto, cancella immagini vecchie, "
+            "aggiorna lo store audit, notifica Jellyfin (path deleted/created + refresh metadati) "
+            "e reinvia i media info. Solo candidati ad alta confidenza (Pronto)."
+        ),
+        "strm_mismatch_apply_min_sim": "Similarità titolo minima per applicare",
+        "strm_mismatch_apply_now": "✍️ Applica retag pronti ({count})",
+        "strm_mismatch_apply_started": "Applicazione retag avviata.",
+        "strm_mismatch_apply_already_running": "Applicazione retag già in corso.",
+        "strm_mismatch_apply_status_title": "Stato applicazione",
+        "strm_mismatch_metric_applied": "Applicati",
+        "strm_mismatch_metric_skipped_apply": "Saltati",
+        "strm_mismatch_metric_failed_apply": "Falliti",
+        "strm_mismatch_apply_log": "Log applicazione",
+        "strm_status_title": "Stato sync",
+        "strm_status_running": "in corso",
+        "strm_status_paused": "in pausa",
+        "strm_status_idle": "inattiva",
+        "strm_metric_movies_created": "Film creati",
+        "strm_metric_movies_updated": "Film aggiornati",
+        "strm_metric_series_created": "Serie create",
+        "strm_metric_series_updated": "Serie aggiornate",
+        "strm_metric_episodes_created": "Episodi creati",
+        "strm_metric_episodes_updated": "Episodi aggiornati",
+        "strm_status_summary": (
+            "Saltati: {skipped_movies} film, {skipped_episodes} episodi · "
+            "Rimossi: {removed_movies} film, {removed_episodes} episodi"
+        ),
+        "strm_status_filter_summary": (
+            "Esclusi: {movies_excluded} film, {series_excluded} serie · "
+            "Senza match TMDB: {movies_unmatched} film, {series_unmatched} serie"
+        ),
+        "strm_status_tmdb_episodes_filtered": (
+            "Filtro episodi TMDB: {count} episodi fantasma saltati/rimossi"
+        ),
+        "strm_status_tmdb_summary": "TMDB: {lookups} ricerche, {cache_hits} hit di cache",
+        "strm_status_item_errors": "Saltati per errori del provider — film: {movies}, serie: {series}",
+        "strm_status_cleanup_skipped": "Cleanup saltato dalla protezione: la risposta del provider sembrava incompleta.",
+        "strm_status_series_source": (
+            "Sorgente serie: {from_m3u} da M3U · {from_api} via fallback API · "
+            "{missing} non trovate nell'M3U"
+        ),
+        "strm_last_sync": "Ultima sync completata: {time}",
+        "strm_sync_summary_title": "Riepilogo ultima sync",
+        "strm_sync_summary_movies": (
+            "Film ({duration}): {created} creati, {updated} aggiornati, "
+            "{skipped} saltati, {excluded} esclusi, {unmatched} senza match TMDB, "
+            "{errors} errori{removed_suffix}"
+        ),
+        "strm_sync_summary_series": (
+            "Serie ({duration}): {series_created} serie create, {series_updated} serie aggiornate · "
+            "{created} episodi creati, {updated} aggiornati, "
+            "{skipped} saltati, {excluded} serie escluse, {unmatched} senza match TMDB, "
+            "{errors} errori{removed_suffix}"
+        ),
+        "strm_sync_summary_total": "Tempo totale: {duration}",
+        "strm_sync_summary_removed_movies": ", {count} rimossi",
+        "strm_sync_summary_removed_episodes": ", {count} episodi rimossi",
+        "strm_log": "Log sync",
+        "strm_promote_title": "📦 Promuovi libreria test → cartella di lavoro",
+        "strm_promote_help": (
+            "Sposta gli .strm (e .nfo) generati da una cartella di test a quella di lavoro, "
+            "mantenendo la struttura. La cache TMDB resta, quindi non si ricalcola nulla."
+        ),
+        "strm_promote_src": "Cartella film sorgente (test)",
+        "strm_promote_src_series": "Cartella serie sorgente (test)",
+        "strm_promote_dst": "Cartella film destinazione (lavoro)",
+        "strm_promote_dst_series": "Cartella serie destinazione (lavoro)",
+        "strm_promote_button": "📦 Sposta test → lavoro",
+        "strm_promote_same_path": "Sorgente e destinazione coincidono: {path}",
+        "strm_promote_done": "Spostati {moved} file.",
+        "strm_recent_title": "Aggiunti di recente dopo sync STRM",
+        "strm_recent_help": (
+            "Titoli ordinati per data del .strm più recente (più recenti in alto). "
+            "Tabelle separate per film e serie."
+        ),
+        "strm_recent_limit": "Quanti titoli per tabella",
+        "strm_recent_movies_table": "Film",
+        "strm_recent_series_table": "Serie",
+        "strm_recent_col_date": "Aggiunto",
+        "strm_recent_col_title": "Titolo",
+        "strm_recent_col_files": "File .strm",
+        "strm_recent_empty_movies": "Nessuna cartella film trovata nel percorso STRM.",
+        "strm_recent_empty_series": "Nessuna cartella serie trovata nel percorso STRM.",
+        "strm_complete_title": "Stagioni complete",
+        "strm_complete_help": (
+            "Fase 1: stagioni complete su disco con almeno una visione JF — storico cumulativo. "
+            "Fase 2: solo stagioni con nuovi .strm creati; quando un nuovo episodio completa "
+            "una stagione, viene aggiunta a un elenco separato. Parte dopo ogni sync STRM."
+        ),
+        "strm_complete_refresh": "Aggiorna analisi stagioni",
+        "strm_complete_started": "Analisi stagioni avviata in background.",
+        "strm_complete_already_running": "Analisi stagioni già in corso.",
+        "strm_complete_running": "Analisi stagioni in corso…",
+        "strm_complete_never": "Nessuna analisi ancora — premi aggiorna (o aspetta il prossimo sync).",
+        "strm_complete_updated": (
+            "Ultima analisi: {time} · storico JF {watched} (+{added}) · "
+            "completate da nuovi ep {by_new} (+{by_new_added})"
+        ),
+        "strm_complete_phase2_table": "Completate da nuovi episodi",
+        "strm_complete_phase2_help": (
+            "Stagioni diventate complete quando sono stati creati nuovi .strm. "
+            "Indipendente dallo storico JF."
+        ),
+        "strm_complete_phase2_empty": "Nessuna stagione completata da nuovi episodi.",
+        "strm_complete_phase2_new_table": "Appena completate da nuovi episodi (questa run)",
+        "strm_complete_phase2_new_help": "Stagioni completate dai nuovi download nell'ultima analisi.",
+        "strm_complete_new_table": "Nuove nello storico JF (questa run)",
+        "strm_complete_new_help": "Stagioni entrate nello storico JF-viste con l'ultima analisi.",
+        "strm_complete_watched_table": "Storico — complete + viste su JF",
+        "strm_complete_watched_help": (
+            "Elenco cumulativo. Ordine: data di prima rilevazione (più recenti in alto)."
+        ),
+        "strm_complete_watched_empty": "Nessuna stagione completa+vista nello storico.",
+        "strm_complete_col_title": "Titolo",
+        "strm_complete_col_season": "Stagione",
+        "strm_complete_col_episodes": "Episodi",
+        "strm_complete_col_updated": "File aggiornati",
+        "strm_complete_col_first_seen": "Aggiunta all'elenco",
+        "strm_complete_log": "Log analisi stagioni",
         "series_default": "Serie",
     },
 }

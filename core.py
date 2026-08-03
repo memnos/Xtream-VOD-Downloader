@@ -2,6 +2,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 from datetime import datetime
 from urllib.parse import urlparse
@@ -10,20 +11,18 @@ import requests
 
 DOWNLOAD_MOVIES_PATH = "/download/movies"
 DOWNLOAD_TV_PATH = "/download/tv"
-DOWNLOAD_TV2_PATH = "/download/tv-2"
-
 STRM_MOVIES_PATH = os.environ.get("STRM_MOVIES_PATH", "/strm/movies")
 STRM_SERIES_PATH = os.environ.get("STRM_SERIES_PATH", "/strm/series")
 
 SEASON_DIR_RE = re.compile(r"^Season\s*0*(\d+)\s*$", re.IGNORECASE)
+EPISODE_TAG_RE = re.compile(r"S(\d{1,2})E(\d{1,2})", re.IGNORECASE)
 
 DOWNLOAD_CONFIG = {
     "movies": DOWNLOAD_MOVIES_PATH,
     "tv": DOWNLOAD_TV_PATH,
-    "tv2": DOWNLOAD_TV2_PATH,
 }
 
-SERIES_DOWNLOAD_PATHS = (DOWNLOAD_TV_PATH, DOWNLOAD_TV2_PATH)
+SERIES_DOWNLOAD_PATHS = (DOWNLOAD_TV_PATH,)
 DEFAULT_SERIES_DEST = DOWNLOAD_TV_PATH
 
 DOWNLOAD_PROGRESS_RE = re.compile(r"\[download\]\s+([\d.]+)%")
@@ -43,6 +42,14 @@ AUTO_DOWNLOAD_FILE = os.environ.get(
 WATCHER_STATUS_FILE = os.environ.get(
     "WATCHER_STATUS_FILE", os.path.join(DATA_DIR, "watcher_status.json")
 )
+STRM_SYNC_FILE = os.environ.get(
+    "STRM_SYNC_FILE", os.path.join(DATA_DIR, "strm_sync.json")
+)
+STRM_SYNC_STATUS_FILE = os.environ.get(
+    "STRM_SYNC_STATUS_FILE", os.path.join(DATA_DIR, "strm_sync_status.json")
+)
+STRM_OUTPUT_MOVIES_PATH = os.environ.get("STRM_OUTPUT_MOVIES_PATH", STRM_MOVIES_PATH)
+STRM_OUTPUT_SERIES_PATH = os.environ.get("STRM_OUTPUT_SERIES_PATH", STRM_SERIES_PATH)
 PLAYBACK_HISTORY_FILE = os.environ.get(
     "PLAYBACK_HISTORY_FILE", os.path.join(DATA_DIR, "playback_history.json")
 )
@@ -53,6 +60,21 @@ DOWNLOAD_HISTORY_FILE = os.environ.get(
 STREAM_PROBE_CACHE_FILE = os.environ.get(
     "STREAM_PROBE_CACHE_FILE", os.path.join(DATA_DIR, "stream_probe_cache.json")
 )
+STRM_DURATION_ERRORS_FILE = os.environ.get(
+    "STRM_DURATION_ERRORS_FILE",
+    os.path.join(DATA_DIR, "strm_duration_errors.json"),
+)
+STRM_DURATION_AUDIT_STATUS_FILE = os.environ.get(
+    "STRM_DURATION_AUDIT_STATUS_FILE",
+    os.path.join(DATA_DIR, "strm_duration_audit_status.json"),
+)
+DISCARDED_MOVIE_STREAMS_FILE = os.environ.get(
+    "DISCARDED_MOVIE_STREAMS_FILE",
+    os.path.join(DATA_DIR, "discarded_movie_streams.json"),
+)
+UI_PREFS_FILE = os.environ.get(
+    "UI_PREFS_FILE", os.path.join(DATA_DIR, "ui_prefs.json")
+)
 PROBE_CACHE_MAX_AGE = int(os.environ.get("PROBE_CACHE_MAX_AGE", str(7 * 86400)))
 MAX_DOWNLOAD_HISTORY = 20
 DIR_MODE = 0o777
@@ -60,7 +82,10 @@ FILE_MODE = 0o664
 DOWNLOAD_ROOTS = (
     DOWNLOAD_MOVIES_PATH,
     DOWNLOAD_TV_PATH,
-    DOWNLOAD_TV2_PATH,
+)
+STRM_OUTPUT_ROOTS = (
+    STRM_OUTPUT_MOVIES_PATH,
+    STRM_OUTPUT_SERIES_PATH,
 )
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts", ".webm"}
 
@@ -107,12 +132,112 @@ def sanitize_filename(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', "", name).strip()
 
 
+def format_elapsed_seconds(seconds: float) -> str:
+    """Human-readable duration for sync summaries (e.g. 2m 15s, 1h 5m)."""
+    total = max(0, int(round(float(seconds or 0))))
+    if total < 60:
+        return f"{total}s"
+    mins, secs = divmod(total, 60)
+    if mins < 60:
+        return f"{mins}m {secs}s" if secs else f"{mins}m"
+    hours, mins = divmod(mins, 60)
+    return f"{hours}h {mins}m" if mins else f"{hours}h"
+
+
+_LOG_TIME_RE = re.compile(r"^\[(\d{2}):(\d{2}):(\d{2})\]")
+
+
+def _log_line_seconds(line: str) -> int | None:
+    match = _LOG_TIME_RE.match(str(line).strip())
+    if not match:
+        return None
+    hours, mins, secs = (int(part) for part in match.groups())
+    return hours * 3600 + mins * 60 + secs
+
+
+def estimate_sync_timing_from_log(log: list) -> dict[str, float]:
+    """Estimate per-phase durations from sync log timestamps (legacy runs)."""
+    markers = {
+        "movies_start": "Loading movie catalog...",
+        "movies_end": "Movies done:",
+        "series_start": "Loading series catalog...",
+        "series_end": "Series done:",
+    }
+    end_markers = ("--- Sync summary ---", "Sync completed", "Cleanup:")
+    times: dict[str, int] = {}
+    sync_end: int | None = None
+
+    for line in log:
+        if not isinstance(line, str):
+            continue
+        ts = _log_line_seconds(line)
+        if ts is None:
+            continue
+        for key, marker in markers.items():
+            if marker in line:
+                times[key] = ts
+        for marker in end_markers:
+            if marker in line:
+                sync_end = ts
+
+    result = {
+        "movies_elapsed_sec": 0.0,
+        "series_elapsed_sec": 0.0,
+        "total_elapsed_sec": 0.0,
+    }
+    if "movies_start" in times and "movies_end" in times:
+        result["movies_elapsed_sec"] = float(max(0, times["movies_end"] - times["movies_start"]))
+    if "series_start" in times and "series_end" in times:
+        result["series_elapsed_sec"] = float(max(0, times["series_end"] - times["series_start"]))
+    if sync_end is not None and "movies_start" in times:
+        result["total_elapsed_sec"] = float(max(0, sync_end - times["movies_start"]))
+    elif result["movies_elapsed_sec"] or result["series_elapsed_sec"]:
+        result["total_elapsed_sec"] = result["movies_elapsed_sec"] + result["series_elapsed_sec"]
+    return result
+
+
+TMDB_ID_TAG_RE = re.compile(r"\s*\[tmdbid-\d+\]\s*", re.IGNORECASE)
+TITLE_YEAR_SUFFIX_RE = re.compile(r"\((\d{4})\)\s*$")
+
+
+def strip_tmdb_id_tag(name: str) -> str:
+    return TMDB_ID_TAG_RE.sub(" ", name or "").strip()
+
+
 def normalize_title(name: str) -> str:
     text = name.lower().strip()
     text = re.sub(r"^\|[^|]+\|", "", text)
+    # Strip Emby/Jellyfin TMDB folder tags so plain titles match
+    # "Title (2021) [tmdbid-123]" folders.
+    text = strip_tmdb_id_tag(text)
     text = re.sub(r"\s*\(\d{4}\)\s*$", "", text)
     text = re.sub(r"[^a-z0-9]+", " ", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def extract_title_year(name: str) -> int | None:
+    text = strip_tmdb_id_tag(name.strip())
+    match = TITLE_YEAR_SUFFIX_RE.search(text)
+    return int(match.group(1)) if match else None
+
+
+def folder_has_tmdb_id(name: str) -> bool:
+    return bool(TMDB_ID_TAG_RE.search(name or ""))
+
+
+def titles_match_loosely(left: str, right: str) -> bool:
+    """Match titles that differ only by a leading article (e.g. Matrix vs The Matrix)."""
+    left_tokens = normalize_title(left).split()
+    right_tokens = normalize_title(right).split()
+    if not left_tokens or not right_tokens:
+        return False
+    if left_tokens == right_tokens:
+        return True
+    if left_tokens[0] == "the" and left_tokens[1:] == right_tokens:
+        return True
+    if right_tokens[0] == "the" and right_tokens[1:] == left_tokens:
+        return True
+    return False
 
 
 QUALITY_4K_RE = re.compile(
@@ -220,6 +345,7 @@ def normalize_base_title(name: str) -> str:
     text = name.lower().strip()
     text = re.sub(r"^\|[^|]+\|", "", text)
     text = QUALITY_MARKER_RE.sub(" ", text)
+    text = strip_tmdb_id_tag(text)
     text = re.sub(r"\s*\(\d{4}\)\s*$", "", text)
     text = re.sub(r"[^a-z0-9]+", " ", text)
     return re.sub(r"\s+", " ", text).strip()
@@ -250,6 +376,7 @@ def pick_best_catalog_item(
     allow_4k: bool = False,
     name_key: str = "name",
     probes: dict[str, dict] | None = None,
+    skip_item=None,
 ) -> dict | None:
     if not items:
         return None
@@ -258,6 +385,8 @@ def pick_best_catalog_item(
         candidates = [
             item for item in items if not _item_is_4k(item, probes, name_key=name_key)
         ]
+    if skip_item is not None:
+        candidates = [item for item in candidates if not skip_item(item)]
     if not candidates:
         return None
     return max(
@@ -275,6 +404,7 @@ def dedupe_catalog_by_quality(
     allow_4k: bool = False,
     name_key: str = "name",
     probes: dict[str, dict] | None = None,
+    skip_item=None,
 ) -> tuple[list[dict], int]:
     groups = group_catalog_versions(items, name_key=name_key)
 
@@ -285,6 +415,7 @@ def dedupe_catalog_by_quality(
             allow_4k=allow_4k,
             name_key=name_key,
             probes=probes,
+            skip_item=skip_item,
         )
         if best:
             result.append(best)
@@ -484,6 +615,40 @@ def build_movie_stream_url(
     return f"{host.rstrip('/')}/movie/{user}/{password}/{stream_id}.{ext_clean}"
 
 
+def normalize_episodes_map(episodes: object) -> dict[str, list]:
+    """Normalize Xtream get_series_info episodes to {season: [ep, ...]}."""
+    if isinstance(episodes, dict):
+        return episodes
+    if not isinstance(episodes, list):
+        return {}
+    grouped: dict[str, list] = {}
+    for ep in episodes:
+        if not isinstance(ep, dict):
+            continue
+        season = ep.get("season")
+        if season is None:
+            info = ep.get("info") or {}
+            season = info.get("season") or info.get("season_number")
+        if season is None:
+            continue
+        grouped.setdefault(str(season), []).append(ep)
+    return grouped
+
+
+def build_episode_stream_url(
+    host: str,
+    user: str,
+    password: str,
+    episode_id: str | int,
+    ext: str = "mp4",
+) -> str:
+    ext_clean = str(ext or "mp4").lstrip(".")
+    return (
+        f"{host.rstrip('/')}/series/{user}/{password}/"
+        f"{episode_id}.{ext_clean}"
+    )
+
+
 def load_probe_cache() -> dict[str, dict]:
     data = load_json_file(STREAM_PROBE_CACHE_FILE, {})
     return data if isinstance(data, dict) else {}
@@ -628,6 +793,127 @@ def probe_stream_url(url: str, timeout: int = 12) -> dict | None:
         return None
 
 
+def probe_stream_duration(url: str, timeout: int = 45) -> float | None:
+    """Probe remote stream duration in seconds (no short read_intervals).
+
+    Returns None when duration cannot be determined.
+    """
+    info = probe_stream_media_info(url, timeout=timeout)
+    if not info:
+        return None
+    duration = float(info.get("duration") or 0)
+    return duration if duration > 0 else None
+
+
+def probe_stream_media_info(url: str, timeout: int = 45) -> dict | None:
+    """Full remote probe: duration, container, and stream list for Jellyfin import.
+
+    Avoids short -read_intervals so duration is available for HTTP VOD.
+    """
+    if not url:
+        return None
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        (
+            "stream=index,codec_type,codec_name,width,height,bit_rate,channels,"
+            "sample_rate,avg_frame_rate,profile,level,pix_fmt:"
+            "stream_tags=language,title:"
+            "format=duration,size,bit_rate,format_name"
+        ),
+        "-probesize",
+        "5000000",
+        "-analyzeduration",
+        "10000000",
+        "-of",
+        "json",
+        url,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        payload = json.loads(result.stdout or "{}")
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, ValueError, OSError):
+        return None
+
+    fmt = payload.get("format") or {}
+    duration = float(fmt.get("duration") or 0)
+    size = int(fmt.get("size") or 0)
+    format_bitrate = int(fmt.get("bit_rate") or fmt.get("bitrate") or 0)
+    container = str(fmt.get("format_name") or "").split(",")[0].strip()
+
+    streams_out: list[dict] = []
+    width = 0
+    height = 0
+    video_codec = ""
+    video_bitrate = 0
+    for stream in payload.get("streams") or []:
+        if not isinstance(stream, dict):
+            continue
+        codec_type = str(stream.get("codec_type") or "").lower()
+        if codec_type == "video":
+            stream_type = "Video"
+        elif codec_type == "audio":
+            stream_type = "Audio"
+        elif codec_type == "subtitle":
+            stream_type = "Subtitle"
+        else:
+            continue
+        tags = stream.get("tags") or {}
+        entry = {
+            "index": int(stream.get("index") or len(streams_out)),
+            "type": stream_type,
+            "codec": str(stream.get("codec_name") or ""),
+            "profile": str(stream.get("profile") or ""),
+            "bit_rate": int(stream.get("bit_rate") or stream.get("bitrate") or 0),
+            "width": int(stream.get("width") or 0),
+            "height": int(stream.get("height") or 0),
+            "channels": int(stream.get("channels") or 0),
+            "sample_rate": int(stream.get("sample_rate") or 0),
+            "average_frame_rate": str(stream.get("avg_frame_rate") or ""),
+            "pixel_format": str(stream.get("pix_fmt") or ""),
+            "language": str(tags.get("language") or tags.get("LANGUAGE") or "").strip(),
+            "title": str(tags.get("title") or tags.get("TITLE") or "").strip(),
+            "is_default": False,
+            "is_external": False,
+        }
+        streams_out.append(entry)
+        if stream_type == "Video" and width <= 0:
+            width = entry["width"]
+            height = entry["height"]
+            video_codec = entry["codec"]
+            video_bitrate = entry["bit_rate"]
+
+    if duration <= 0 and width <= 0 and not streams_out:
+        return None
+
+    if size <= 0:
+        content_length = fetch_content_length(url, timeout=min(timeout, 15))
+        if content_length > 0:
+            size = content_length
+
+    return {
+        "duration": duration,
+        "size": size,
+        "bitrate": video_bitrate or format_bitrate,
+        "container": container,
+        "width": width,
+        "height": height,
+        "codec": video_codec,
+        "streams": streams_out,
+        "probed_at": time.time(),
+    }
+
+
 def _probe_cache_key(item: dict) -> str:
     stream_id = str(item.get("stream_id") or "")
     ext = str(item.get("container_extension") or "mp4")
@@ -759,29 +1045,719 @@ def movie_folder_from_strm_path(strm_path: str) -> str | None:
     return parts[-2] if len(parts) >= 2 else None
 
 
+def series_folder_from_media_path(path: str) -> str | None:
+    parts = _path_parts(path)
+    if len(parts) < 2:
+        return None
+    parent = parts[-2]
+    if SEASON_DIR_RE.match(parent):
+        return parts[-3] if len(parts) >= 3 else None
+    return parent
+
+
+def parse_episode_numbers_from_path(path: str) -> tuple[int, int] | None:
+    """Parse season/episode from SxxExx in the filename, else from Season folder + filename."""
+    parts = _path_parts(path)
+    if not parts:
+        return None
+    match = EPISODE_TAG_RE.search(parts[-1])
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    if len(parts) >= 2:
+        season_match = SEASON_DIR_RE.match(parts[-2])
+        if season_match:
+            ep_only = re.search(r"(?:^|[\s._-])E(\d{1,2})(?:\D|$)", parts[-1], re.IGNORECASE)
+            if ep_only:
+                return int(season_match.group(1)), int(ep_only.group(1))
+    return None
+
+
+def _local_episode_file(directory: str, season: int, episode: int) -> str | None:
+    """Return a local video for season/episode, preferring [LOCAL] downloads.
+
+    Accepts any video whose name contains a matching SxxExx tag (scene releases,
+    renames, etc.), not only files marked with LOCAL_DOWNLOAD_MARKER.
+    """
+    if not directory or not os.path.isdir(directory):
+        return None
+    season_i = int(season)
+    episode_i = int(episode)
+    preferred: str | None = None
+    fallback: str | None = None
+    for filename in os.listdir(directory):
+        ext = os.path.splitext(filename)[1].lower()
+        if ext not in VIDEO_EXTENSIONS:
+            continue
+        match = EPISODE_TAG_RE.search(filename)
+        if not match:
+            continue
+        if int(match.group(1)) != season_i or int(match.group(2)) != episode_i:
+            continue
+        full = os.path.join(directory, filename)
+        if not (os.path.isfile(full) and os.path.getsize(full) > 0):
+            continue
+        if LOCAL_DOWNLOAD_MARKER in filename:
+            preferred = full
+            break
+        if fallback is None:
+            fallback = full
+    return preferred or fallback
+
+
+def _local_movie_file(directory: str, movie_folder: str) -> str | None:
+    """Return a local movie video in directory, preferring [LOCAL] downloads."""
+    if not directory or not os.path.isdir(directory):
+        return None
+    preferred: str | None = None
+    fallback: str | None = None
+    prefix = f"{movie_folder}{LOCAL_DOWNLOAD_MARKER}."
+    for filename in os.listdir(directory):
+        ext = os.path.splitext(filename)[1].lower()
+        if ext not in VIDEO_EXTENSIONS:
+            continue
+        full = os.path.join(directory, filename)
+        if not (os.path.isfile(full) and os.path.getsize(full) > 0):
+            continue
+        if filename.startswith(prefix) or LOCAL_DOWNLOAD_MARKER in filename:
+            preferred = full
+            break
+        if fallback is None:
+            fallback = full
+    return preferred or fallback
+
+
+def _candidate_series_folders(series_folder: str, root: str) -> list[str]:
+    folders: list[str] = []
+    if series_folder:
+        sanitized = sanitize_filename(series_folder)
+        folders.append(sanitized)
+    match = find_strm_folder_match(root, series_folder)
+    if match and match not in folders:
+        folders.append(match)
+    return folders
+
+
+def find_local_files_for_strm(strm_path: str) -> list[str]:
+    """Return local download files that supersede a .strm entry."""
+    strm_path = os.path.realpath(strm_path)
+    if not strm_path.lower().endswith(".strm"):
+        return []
+
+    found: list[str] = []
+    episode_numbers = parse_episode_numbers_from_path(strm_path)
+    if episode_numbers is not None:
+        season, episode = episode_numbers
+        series_folder = series_folder_from_media_path(strm_path) or ""
+        search_dirs: list[str] = [os.path.dirname(strm_path)]
+        for dl_root in SERIES_DOWNLOAD_PATHS:
+            for folder_name in _candidate_series_folders(series_folder, dl_root):
+                season_folder = resolve_season_folder_name(
+                    folder_name, season, strm_path=strm_path
+                )
+                search_dirs.append(os.path.join(dl_root, folder_name, season_folder))
+        seen_dirs: set[str] = set()
+        for directory in search_dirs:
+            real_dir = os.path.realpath(directory)
+            if real_dir in seen_dirs:
+                continue
+            seen_dirs.add(real_dir)
+            hit = _local_episode_file(real_dir, season, episode)
+            if hit:
+                found.append(hit)
+        return list(dict.fromkeys(found))
+
+    movie_folder = movie_folder_from_strm_path(strm_path) or ""
+    search_dirs = [os.path.dirname(strm_path)]
+    if movie_folder:
+        exact_dl = os.path.join(DOWNLOAD_MOVIES_PATH, movie_folder)
+        search_dirs.append(exact_dl)
+        if not os.path.isdir(exact_dl):
+            match = find_strm_folder_match(DOWNLOAD_MOVIES_PATH, movie_folder)
+            if match:
+                search_dirs.append(os.path.join(DOWNLOAD_MOVIES_PATH, match))
+    seen_dirs = set()
+    for directory in search_dirs:
+        real_dir = os.path.realpath(directory)
+        if real_dir in seen_dirs:
+            continue
+        seen_dirs.add(real_dir)
+        folder_name = os.path.basename(real_dir)
+        hit = _local_movie_file(real_dir, folder_name)
+        if hit:
+            found.append(hit)
+    return list(dict.fromkeys(found))
+
+
+def local_download_exists_for_strm(strm_path: str) -> bool:
+    return bool(find_local_files_for_strm(strm_path))
+
+
+def find_strm_files_for_local(local_path: str) -> list[str]:
+    """Find .strm library files replaced by a local download."""
+    local_path = os.path.realpath(local_path)
+    if LOCAL_DOWNLOAD_MARKER not in os.path.basename(local_path):
+        return []
+
+    found: list[str] = []
+    episode_numbers = parse_episode_numbers_from_path(local_path)
+    if episode_numbers is not None:
+        season, episode = episode_numbers
+        series_folder = series_folder_from_media_path(local_path) or ""
+        se_tag = f"S{int(season):02d}E{int(episode):02d}"
+        search_roots = [STRM_OUTPUT_SERIES_PATH]
+        for root in search_roots:
+            for folder_name in _candidate_series_folders(series_folder, root):
+                series_dir = os.path.join(root, folder_name)
+                if not os.path.isdir(series_dir):
+                    continue
+                for dirpath, _dirs, files in os.walk(series_dir):
+                    for filename in files:
+                        if not filename.lower().endswith(".strm"):
+                            continue
+                        if se_tag not in filename.upper():
+                            continue
+                        found.append(os.path.join(dirpath, filename))
+        strm_dir = os.path.dirname(local_path)
+        for filename in os.listdir(strm_dir):
+            if filename.lower().endswith(".strm") and se_tag in filename.upper():
+                found.append(os.path.join(strm_dir, filename))
+        return list(dict.fromkeys(found))
+
+    movie_folder = os.path.basename(os.path.dirname(local_path))
+    search_dirs = [os.path.join(STRM_OUTPUT_MOVIES_PATH, movie_folder)]
+    if not os.path.isdir(search_dirs[0]):
+        match = find_strm_folder_match(STRM_OUTPUT_MOVIES_PATH, movie_folder)
+        if match:
+            search_dirs.append(os.path.join(STRM_OUTPUT_MOVIES_PATH, match))
+    for directory in search_dirs:
+        if not os.path.isdir(directory):
+            continue
+        for filename in os.listdir(directory):
+            if filename.lower().endswith(".strm"):
+                found.append(os.path.join(directory, filename))
+    return list(dict.fromkeys(found))
+
+
+_MEDIA_SIDECAR_EXTS = (".nfo", ".jpg", ".jpeg", ".png", ".webp")
+_TMDB_ID_IN_PATH_RE = re.compile(r"\[tmdbid-(\d+)\]", re.IGNORECASE)
+_EPISODE_NFO_SKIP_NAMES = {"season.nfo", "tvshow.nfo", "folder.nfo"}
+
+
+def _remove_path_and_sidecars(media_path: str) -> list[str]:
+    """Delete a media file and same-basename sidecars (.nfo / images)."""
+    removed: list[str] = []
+    if not media_path:
+        return removed
+    real = os.path.realpath(media_path)
+    if os.path.isfile(real):
+        try:
+            os.remove(real)
+            removed.append(real)
+        except OSError:
+            pass
+    base, _ext = os.path.splitext(real)
+    for sidecar_ext in _MEDIA_SIDECAR_EXTS:
+        sidecar = base + sidecar_ext
+        if os.path.isfile(sidecar):
+            try:
+                os.remove(sidecar)
+                removed.append(sidecar)
+            except OSError:
+                pass
+    return removed
+
+
+def delete_strm_after_local_download(
+    local_path: str,
+    *,
+    strm_path: str | None = None,
+) -> list[str]:
+    """Delete .strm files (and sidecars) superseded by a completed local download."""
+    candidates: list[str] = []
+    if strm_path:
+        candidates.append(os.path.realpath(strm_path))
+    candidates.extend(find_strm_files_for_local(local_path))
+
+    deleted: list[str] = []
+    seen: set[str] = set()
+    for path in candidates:
+        real = os.path.realpath(path)
+        if real in seen or not real.lower().endswith(".strm"):
+            continue
+        seen.add(real)
+        if not os.path.isfile(real):
+            continue
+        deleted.extend(_remove_path_and_sidecars(real))
+    return deleted
+
+
+def _episode_nfo_matches(filename: str, season: int, episode: int) -> bool:
+    lower = filename.lower()
+    if not lower.endswith(".nfo"):
+        return False
+    if lower in _EPISODE_NFO_SKIP_NAMES:
+        return False
+    match = EPISODE_TAG_RE.search(filename)
+    if not match:
+        return False
+    return int(match.group(1)) == int(season) and int(match.group(2)) == int(episode)
+
+
+def _episode_nfo_search_dirs(media_path: str, season: int) -> list[str]:
+    """Season dirs on download + strm sides where leftover episode NFOs may live."""
+    dirs: list[str] = [os.path.dirname(media_path)]
+    series_folder = series_folder_from_media_path(media_path) or ""
+    search_roots = (STRM_OUTPUT_SERIES_PATH, *SERIES_DOWNLOAD_PATHS)
+    for root in search_roots:
+        for folder_name in _candidate_series_folders(series_folder, root):
+            series_dir = os.path.join(root, folder_name)
+            if not os.path.isdir(series_dir):
+                continue
+            found_season = False
+            try:
+                for name in os.listdir(series_dir):
+                    match = SEASON_DIR_RE.match(name)
+                    if match and int(match.group(1)) == int(season):
+                        dirs.append(os.path.join(series_dir, name))
+                        found_season = True
+            except OSError:
+                pass
+            if not found_season:
+                dirs.append(os.path.join(series_dir, f"Season {int(season):02d}"))
+    seen: set[str] = set()
+    out: list[str] = []
+    for directory in dirs:
+        try:
+            real = os.path.realpath(directory)
+        except OSError:
+            continue
+        if real in seen or not os.path.isdir(real):
+            continue
+        seen.add(real)
+        out.append(real)
+    return out
+
+
+def align_episode_nfo_to_media(media_path: str) -> dict:
+    """Make episode .nfo match the media basename; drop stale same-SxxExx NFOs.
+
+    Works for both [LOCAL] videos and restored .strm files. If the target .nfo is
+    missing and an older episode .nfo exists, rename the best candidate onto the
+    new basename. Always delete other same-episode leftovers.
+    """
+    result: dict = {
+        "target_nfo": "",
+        "renamed_from": "",
+        "deleted": [],
+        "skipped": False,
+    }
+    media_path = os.path.realpath(media_path)
+    episode_numbers = parse_episode_numbers_from_path(media_path)
+    if episode_numbers is None:
+        result["skipped"] = True
+        return result
+    season, episode = episode_numbers
+    target_nfo = os.path.splitext(media_path)[0] + ".nfo"
+    result["target_nfo"] = target_nfo
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for directory in _episode_nfo_search_dirs(media_path, season):
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            continue
+        for name in names:
+            if not _episode_nfo_matches(name, season, episode):
+                continue
+            full = os.path.realpath(os.path.join(directory, name))
+            if full in seen:
+                continue
+            seen.add(full)
+            candidates.append(full)
+
+    target_real = os.path.realpath(target_nfo)
+    target_exists = os.path.isfile(target_real)
+    others = [path for path in candidates if path != target_real]
+
+    if not target_exists and others:
+        media_dir = os.path.realpath(os.path.dirname(media_path))
+        preferred = next(
+            (path for path in others if os.path.dirname(path) == media_dir),
+            others[0],
+        )
+        try:
+            os.replace(preferred, target_nfo)
+            result["renamed_from"] = preferred
+            others = [path for path in others if path != preferred]
+            target_exists = True
+        except OSError:
+            pass
+
+    deleted: list[str] = []
+    for path in others:
+        try:
+            os.remove(path)
+            deleted.append(path)
+        except OSError:
+            pass
+    result["deleted"] = deleted
+    return result
+
+
+def align_episode_nfo_after_local_download(local_path: str) -> dict:
+    """Make episode .nfo match the [LOCAL] video basename; drop stale SxxExx NFOs."""
+    basename = os.path.basename(local_path)
+    if LOCAL_DOWNLOAD_MARKER not in basename:
+        return {
+            "target_nfo": "",
+            "renamed_from": "",
+            "deleted": [],
+            "skipped": True,
+        }
+    return align_episode_nfo_to_media(local_path)
+
+
+def map_local_path_to_media_server(
+    path: str,
+    *,
+    server: str,
+    config: dict | None = None,
+) -> str | None:
+    """Map xtream-downloader library path to Emby/Jellyfin container path."""
+    if not path:
+        return None
+    cfg = config if isinstance(config, dict) else load_auto_download_config()
+    server_key = (server or "").lower()
+    if server_key == "jellyfin":
+        series_dst = str(cfg.get("jellyfin_series_root") or "/media/tv").rstrip("/")
+        movies_dst = str(cfg.get("jellyfin_movies_root") or "/media/movies").rstrip("/")
+    else:
+        series_dst = str(cfg.get("emby_series_root") or "/data/tv").rstrip("/")
+        movies_dst = str(cfg.get("emby_movies_root") or "/data/movies").rstrip("/")
+
+    normalized = path.replace("\\", "/")
+    mappings = (
+        (DOWNLOAD_TV_PATH.rstrip("/"), series_dst),
+        (STRM_OUTPUT_SERIES_PATH.rstrip("/"), series_dst),
+        (DOWNLOAD_MOVIES_PATH.rstrip("/"), movies_dst),
+        (STRM_OUTPUT_MOVIES_PATH.rstrip("/"), movies_dst),
+    )
+    for src, dst in mappings:
+        if not src or not dst:
+            continue
+        if normalized == src:
+            return dst
+        if normalized.startswith(src + "/"):
+            return dst + normalized[len(src) :]
+        try:
+            real_src = os.path.realpath(src).replace("\\", "/")
+            real_path = os.path.realpath(path).replace("\\", "/")
+        except OSError:
+            continue
+        if real_path == real_src:
+            return dst
+        if real_path.startswith(real_src + "/"):
+            return dst + real_path[len(real_src) :]
+    return None
+
+
+def _extract_tmdb_id_from_path(path: str) -> int | None:
+    match = _TMDB_ID_IN_PATH_RE.search(path or "")
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def notify_media_servers_after_local_download(
+    local_path: str,
+    *,
+    deleted_paths: list[str] | None = None,
+) -> list[str]:
+    """Notify Emby/Jellyfin of created local media and deleted .strm paths."""
+    notes: list[str] = []
+    try:
+        from emby_watcher import MediaServerClient
+    except ImportError:
+        return ["media_client_unavailable"]
+
+    config = load_auto_download_config()
+    servers: list[tuple[str, str, str, str]] = []
+    if config.get("emby_enabled"):
+        servers.append(
+            (
+                "emby",
+                str(config.get("emby_url") or "").strip(),
+                str(config.get("emby_api_key") or "").strip(),
+                "emby",
+            )
+        )
+    if config.get("jellyfin_enabled"):
+        servers.append(
+            (
+                "jellyfin",
+                str(config.get("jellyfin_url") or "").strip(),
+                str(config.get("jellyfin_api_key") or "").strip(),
+                "jellyfin",
+            )
+        )
+    if not servers:
+        return ["no_media_servers"]
+
+    local_path = os.path.realpath(local_path)
+    series_folder = series_folder_from_media_path(local_path)
+    series_dir = ""
+    if series_folder:
+        parent = os.path.dirname(local_path)
+        # Season XX -> series folder
+        if SEASON_DIR_RE.match(os.path.basename(parent) or ""):
+            series_dir = os.path.dirname(parent)
+        else:
+            series_dir = parent
+
+    tmdb_id = _extract_tmdb_id_from_path(local_path) or _extract_tmdb_id_from_path(
+        series_folder or ""
+    )
+    is_episode = parse_episode_numbers_from_path(local_path) is not None
+
+    for _name, url, api_key, server_type in servers:
+        if not url or not api_key:
+            notes.append(f"{server_type}:not_configured")
+            continue
+        try:
+            client = MediaServerClient(url, api_key, server_type)
+            updates: list[dict] = []
+            mapped_local = map_local_path_to_media_server(
+                local_path, server=server_type, config=config
+            )
+            if mapped_local:
+                updates.append({"Path": mapped_local, "UpdateType": "Created"})
+            if series_dir:
+                mapped_series = map_local_path_to_media_server(
+                    series_dir, server=server_type, config=config
+                )
+                if mapped_series:
+                    updates.append({"Path": mapped_series, "UpdateType": "Modified"})
+            else:
+                mapped_series = None
+            for deleted in deleted_paths or []:
+                mapped_del = map_local_path_to_media_server(
+                    deleted, server=server_type, config=config
+                )
+                if mapped_del:
+                    updates.append({"Path": mapped_del, "UpdateType": "Deleted"})
+            # Deduplicate while preserving order
+            seen_upd: set[tuple[str, str]] = set()
+            unique_updates: list[dict] = []
+            for upd in updates:
+                key = (str(upd.get("Path") or ""), str(upd.get("UpdateType") or ""))
+                if not key[0] or key in seen_upd:
+                    continue
+                seen_upd.add(key)
+                unique_updates.append(upd)
+            if unique_updates:
+                client.notify_library_paths(unique_updates)
+
+            refreshed = 0
+            if is_episode and series_dir:
+                series_items: list = []
+                if mapped_series:
+                    try:
+                        series_items = client.find_series_near_path(
+                            mapped_series, tmdb_id=tmdb_id
+                        )
+                    except Exception:
+                        series_items = []
+                if not series_items and tmdb_id:
+                    try:
+                        series_items = client.find_series_by_tmdb_id(tmdb_id)
+                    except Exception:
+                        series_items = []
+                for item in series_items:
+                    item_id = str(item.get("Id") or "")
+                    if not item_id:
+                        continue
+                    try:
+                        client.refresh_item_metadata(item_id, replace_all=False)
+                        refreshed += 1
+                    except Exception:
+                        continue
+            notes.append(
+                f"{server_type}:ok updates={len(unique_updates)} refreshed={refreshed}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"{server_type}:error:{exc}")
+    return notes
+
+
+def finalize_after_local_download(
+    local_path: str,
+    *,
+    strm_path: str | None = None,
+    notify: bool = True,
+) -> dict:
+    """Post-download cleanup: remove superseded .strm, align NFOs, notify JF/Emby."""
+    deleted = delete_strm_after_local_download(local_path, strm_path=strm_path)
+    nfo = align_episode_nfo_after_local_download(local_path)
+    notify_notes: list[str] = []
+    if notify:
+        # Include removed leftover NFOs so servers drop orphans quickly.
+        deleted_for_notify = list(deleted) + list(nfo.get("deleted") or [])
+        notify_notes = notify_media_servers_after_local_download(
+            local_path, deleted_paths=deleted_for_notify
+        )
+    return {
+        "deleted": deleted,
+        "nfo": nfo,
+        "notify": notify_notes,
+    }
+
+
+# Per-root folder listing cache for find_strm_folder_match.
+# Without this, each sync call re-listdir's /download/movies (~20k dirs) per title.
+_folder_index_lock = threading.Lock()
+
+
+class _FolderIndex:
+    __slots__ = ("mtime", "exact", "loose")
+
+    def __init__(
+        self,
+        mtime: float,
+        exact: dict[str, list[tuple[str, int | None]]],
+        loose: dict[str, list[tuple[str, int | None]]],
+    ) -> None:
+        self.mtime = mtime
+        # normalized_title -> [(folder_name, year)]
+        self.exact = exact
+        # normalized_title without leading "the" -> [(folder_name, year)]
+        self.loose = loose
+
+
+_folder_index: dict[str, _FolderIndex] = {}
+
+
+def clear_folder_match_cache(root: str | None = None) -> None:
+    """Drop cached folder listings (all roots, or one). Useful in tests."""
+    with _folder_index_lock:
+        if root is None:
+            _folder_index.clear()
+            return
+        keys = {root}
+        try:
+            keys.add(os.path.realpath(root))
+        except OSError:
+            pass
+        for key in keys:
+            _folder_index.pop(key, None)
+
+
+def _loose_title_key(normalized: str) -> str:
+    tokens = normalized.split()
+    if tokens and tokens[0] == "the":
+        return " ".join(tokens[1:])
+    return normalized
+
+
+def _build_folder_index(root: str, mtime: float) -> _FolderIndex:
+    exact: dict[str, list[tuple[str, int | None]]] = {}
+    loose: dict[str, list[tuple[str, int | None]]] = {}
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return _FolderIndex(mtime, exact, loose)
+    for name in names:
+        folder = os.path.join(root, name)
+        if not os.path.isdir(folder):
+            continue
+        norm = normalize_title(name)
+        if not norm:
+            continue
+        year = extract_title_year(name)
+        entry = (name, year)
+        exact.setdefault(norm, []).append(entry)
+        loose.setdefault(_loose_title_key(norm), []).append(entry)
+    return _FolderIndex(mtime, exact, loose)
+
+
+def _get_folder_index(root: str) -> _FolderIndex | None:
+    """Return a mtime-cached index of directories under root."""
+    try:
+        mtime = os.path.getmtime(root)
+        key = os.path.realpath(root)
+    except OSError:
+        return None
+
+    with _folder_index_lock:
+        cached = _folder_index.get(key)
+        if cached is not None and cached.mtime == mtime:
+            return cached
+
+    built = _build_folder_index(root, mtime)
+    with _folder_index_lock:
+        try:
+            mtime_now = os.path.getmtime(root)
+        except OSError:
+            mtime_now = mtime
+        # Keep the listing we built; stamp with current mtime for next hit.
+        built.mtime = mtime_now
+        _folder_index[key] = built
+        return built
+
+
+def _pick_folder_match(
+    candidates: list[tuple[str, int | None]],
+    target_year: int | None,
+    *,
+    target_norm: str,
+    prefer_shortest_exact: bool,
+) -> str | None:
+    # Same year filter as before: drop only when both sides have years and they differ.
+    names = [
+        name
+        for name, folder_year in candidates
+        if not (target_year and folder_year and target_year != folder_year)
+    ]
+    if not names:
+        return None
+    # Prefer Emby/Jellyfin TMDB-named folders over plain duplicates.
+    tmdb_names = [name for name in names if folder_has_tmdb_id(name)]
+    pool = tmdb_names or names
+    if prefer_shortest_exact:
+        return sorted(pool, key=len)[0]
+    return min(
+        pool,
+        key=lambda name: abs(len(normalize_title(name)) - len(target_norm)),
+    )
+
+
 def find_strm_folder_match(root: str, title: str) -> str | None:
     if not root or not os.path.isdir(root):
         return None
     target = normalize_title(title)
     if not target:
         return None
+    target_year = extract_title_year(title)
+    index = _get_folder_index(root)
+    if index is None:
+        return None
 
-    exact: list[str] = []
-    partial: list[str] = []
-    for name in os.listdir(root):
-        folder = os.path.join(root, name)
-        if not os.path.isdir(folder):
-            continue
-        norm = normalize_title(name)
-        if norm == target:
-            exact.append(name)
-        elif target in norm or norm in target:
-            partial.append(name)
-
+    exact = index.exact.get(target)
     if exact:
-        return sorted(exact, key=len)[0]
-    if partial:
-        return min(partial, key=lambda name: abs(len(normalize_title(name)) - len(target)))
+        return _pick_folder_match(
+            exact, target_year, target_norm=target, prefer_shortest_exact=True
+        )
+
+    loose = index.loose.get(_loose_title_key(target))
+    if loose:
+        # Exclude exact-normalized duplicates already handled above; loose
+        # matching only covers leading-article differences.
+        return _pick_folder_match(
+            loose, target_year, target_norm=target, prefer_shortest_exact=False
+        )
     return None
 
 
@@ -793,6 +1769,12 @@ def resolve_series_folder_name(series_name: str, strm_path: str | None = None) -
     match = find_strm_folder_match(STRM_SERIES_PATH, series_name)
     if match:
         return sanitize_filename(match)
+    # After .strm deletion the library path is gone; reuse an existing download
+    # folder (preferring [tmdbid-…] names) instead of creating a plain duplicate.
+    for root in SERIES_DOWNLOAD_PATHS:
+        match = find_strm_folder_match(root, series_name)
+        if match:
+            return sanitize_filename(match)
     return sanitize_filename(series_name)
 
 
@@ -802,6 +1784,9 @@ def resolve_movie_folder_name(movie_name: str, strm_path: str | None = None) -> 
         if from_strm:
             return sanitize_filename(from_strm)
     match = find_strm_folder_match(STRM_MOVIES_PATH, movie_name)
+    if match:
+        return sanitize_filename(match)
+    match = find_strm_folder_match(DOWNLOAD_MOVIES_PATH, movie_name)
     if match:
         return sanitize_filename(match)
     return sanitize_filename(movie_name)
@@ -841,6 +1826,11 @@ def _is_under_download_roots(path: str) -> bool:
     return any(real == root or real.startswith(root + os.sep) for root in DOWNLOAD_ROOTS)
 
 
+def _is_under_strm_output_roots(path: str) -> bool:
+    real = os.path.realpath(path)
+    return any(real == root or real.startswith(root + os.sep) for root in STRM_OUTPUT_ROOTS)
+
+
 def _apply_path_permissions(path: str, uid: int, gid: int) -> None:
     try:
         if os.geteuid() == 0:
@@ -876,15 +1866,17 @@ def finalize_download_path(path: str, fix_children: bool = False) -> None:
 
 
 def ensure_download_tree_permissions() -> None:
-    """On startup (as root), fix ownership of existing downloads and .data."""
+    """Ensure download/.data roots exist and have correct owner/mode.
+
+    Only touches the root directories themselves. A full recursive walk over the
+    library (tens of thousands of folders on HDD/WSL) used to run on every
+    Streamlit rerun and made menu changes take minutes. Per-file ownership is
+    still applied when downloads finish via finalize_download_path().
+    """
     uid, gid = owner_ids()
-    roots = list(DOWNLOAD_ROOTS) + [DATA_DIR]
-    for base in roots:
+    for base in list(DOWNLOAD_ROOTS) + [DATA_DIR]:
         os.makedirs(base, mode=DIR_MODE, exist_ok=True)
-        for root, dirs, files in os.walk(base):
-            for name in [root, *dirs, *files]:
-                full = name if name == root else os.path.join(root, name)
-                _apply_path_permissions(full, uid, gid)
+        _apply_path_permissions(base, uid, gid)
 
 
 def set_owner(path: str, recursive: bool = True) -> None:
@@ -912,9 +1904,231 @@ def prepare_output_dir(path: str) -> None:
     finalize_download_path(path)
 
 
+def finalize_strm_path(path: str, fix_children: bool = False) -> None:
+    if not path or not os.path.exists(path):
+        return
+    uid, gid = owner_ids()
+    current = os.path.realpath(path)
+    # Always fix the target itself, then walk up parents under known roots.
+    _apply_path_permissions(current, uid, gid)
+    parent = os.path.dirname(current)
+    while parent and _is_under_strm_output_roots(parent):
+        _apply_path_permissions(parent, uid, gid)
+        if parent in STRM_OUTPUT_ROOTS:
+            break
+        parent = os.path.dirname(parent)
+    if fix_children and os.path.isdir(path):
+        for root, dirs, files in os.walk(path):
+            for name in dirs + files:
+                _apply_path_permissions(os.path.join(root, name), uid, gid)
+
+
+def prepare_strm_dir(path: str) -> None:
+    if not path:
+        return
+    path = os.path.normpath(path)
+    # Track which directory levels we actually create so we can fix their
+    # ownership even when the output is an arbitrary path (e.g. a test folder)
+    # outside the known STRM output roots.
+    created: list[str] = []
+    cur = path
+    while cur and not os.path.isdir(cur):
+        created.append(cur)
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    os.makedirs(path, mode=DIR_MODE, exist_ok=True)
+    uid, gid = owner_ids()
+    for level in reversed(created):
+        _apply_path_permissions(level, uid, gid)
+
+
+def write_strm(path: str, url: str) -> bool:
+    """Write a .strm file. Returns True if created/updated, False if unchanged."""
+    url = url.strip()
+    if not url:
+        return False
+    existing = read_strm_url(path)
+    if existing == url and os.path.isfile(path):
+        return False
+    parent = os.path.dirname(path)
+    prepare_strm_dir(parent)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(url + "\n")
+    finalize_strm_path(path)
+    return True
+
+
+def build_movie_strm_path(movie_name: str, dest_root: str) -> tuple[str, str]:
+    safe_name = sanitize_filename(movie_name)
+    folder = os.path.join(dest_root, safe_name)
+    return folder, os.path.join(folder, f"{safe_name}.strm")
+
+
+def move_strm_library(src_root: str, dst_root: str, *, overwrite: bool = True) -> dict:
+    """Move every .strm (and sibling .nfo) from src_root into dst_root.
+
+    Mirrors the relative folder structure so a library generated in a test
+    directory can be promoted to the working directory without regenerating.
+    """
+    import shutil
+
+    result = {"moved": 0, "skipped": 0, "removed_dirs": 0}
+    if not src_root or not os.path.isdir(src_root):
+        return result
+    src_root = os.path.realpath(src_root)
+    prepare_strm_dir(dst_root)
+
+    for dirpath, _dirs, files in os.walk(src_root):
+        for filename in files:
+            if not filename.lower().endswith((".strm", ".nfo")):
+                continue
+            src_path = os.path.join(dirpath, filename)
+            rel = os.path.relpath(src_path, src_root)
+            dst_path = os.path.join(dst_root, rel)
+            if os.path.exists(dst_path) and not overwrite:
+                result["skipped"] += 1
+                continue
+            prepare_strm_dir(os.path.dirname(dst_path))
+            shutil.move(src_path, dst_path)
+            finalize_strm_path(dst_path)
+            result["moved"] += 1
+
+    for dirpath, dirs, files in os.walk(src_root, topdown=False):
+        if dirpath == src_root:
+            continue
+        if not os.listdir(dirpath):
+            try:
+                os.rmdir(dirpath)
+                result["removed_dirs"] += 1
+            except OSError:
+                pass
+    return result
+
+
+def build_episode_strm_path(
+    series_name: str,
+    season: int,
+    episode: int,
+    dest_root: str,
+    *,
+    strm_path: str | None = None,
+) -> tuple[str, str]:
+    safe_series = resolve_series_folder_name(series_name, strm_path)
+    season_folder = resolve_season_folder_name(safe_series, season, strm_path)
+    folder = os.path.join(dest_root, safe_series, season_folder)
+    filename = f"{safe_series} - S{int(season):02d}E{int(episode):02d}.strm"
+    return folder, os.path.join(folder, filename)
+
+
+def tmdb_movie_folder_name(title: str, year: int | None, tmdb_id: int | str | None) -> str:
+    base = sanitize_filename(str(title).strip())
+    if year:
+        base = f"{base} ({int(year)})"
+    if tmdb_id:
+        base = f"{base} [tmdbid-{tmdb_id}]"
+    return base
+
+
+def tmdb_series_folder_name(title: str, year: int | None, tmdb_id: int | str | None) -> str:
+    return tmdb_movie_folder_name(title, year, tmdb_id)
+
+
+def build_movie_strm_path_tmdb(
+    title: str,
+    year: int | None,
+    tmdb_id: int | str | None,
+    dest_root: str,
+) -> tuple[str, str]:
+    folder_name = tmdb_movie_folder_name(title, year, tmdb_id)
+    folder = os.path.join(dest_root, folder_name)
+    return folder, os.path.join(folder, f"{folder_name}.strm")
+
+
+def build_episode_strm_path_tmdb(
+    title: str,
+    year: int | None,
+    tmdb_id: int | str | None,
+    season: int,
+    episode: int,
+    dest_root: str,
+) -> tuple[str, str]:
+    folder_name = tmdb_series_folder_name(title, year, tmdb_id)
+    season_folder = f"Season {int(season):02d}"
+    folder = os.path.join(dest_root, folder_name, season_folder)
+    safe_title = sanitize_filename(str(title).strip())
+    if year:
+        safe_title = f"{safe_title} ({int(year)})"
+    filename = f"{safe_title} - S{int(season):02d}E{int(episode):02d}.strm"
+    return folder, os.path.join(folder, filename)
+
+
+DEFAULT_ADULT_TERMS = [
+    "xxx",
+    "porn",
+    "porno",
+    "hardcore",
+    "hard core",
+    "softcore",
+    "erotic",
+    "erotico",
+    "erotica",
+    "sesso",
+    "sexo",
+    "adult",
+    "adulti",
+    "+18",
+    "18+",
+    "vietato ai minori",
+    "brazzers",
+    "onlyfans",
+    "milf",
+    "hentai",
+    "creampie",
+    "anal",
+    "blowjob",
+    "fetish",
+    "bdsm",
+    "camgirl",
+    "playboy",
+    "naughty",
+]
+
+_ADULT_CATEGORY_RE = re.compile(
+    r"(?:\bxxx\b|\bporn|\badult|\bhard\b|\berotic|\bsex\b|\bsexo\b|\bsesso\b|"
+    r"\bhentai\b|\+18\b|\b18\+|\bvm18\b|\bvietat)",
+    re.IGNORECASE,
+)
+
+
+def is_adult_category(category_name: str) -> bool:
+    return bool(_ADULT_CATEGORY_RE.search(category_name or ""))
+
+
+def _term_matches(text: str, term: str) -> bool:
+    term = term.strip().lower()
+    if not term:
+        return False
+    haystack = text.lower()
+    if not re.search(r"[a-z0-9]", term):
+        return term in haystack
+    if re.fullmatch(r"[a-z0-9 ]+", term):
+        return re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", haystack) is not None
+    return term in haystack
+
+
+def title_matches_terms(name: str, terms: list[str]) -> bool:
+    for term in terms:
+        if _term_matches(name, term):
+            return True
+    return False
+
+
 def _ensure_data_dir() -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
-    set_owner(DATA_DIR, recursive=True)
+    # Non-recursive: this runs on every JSON save; .data can grow large (TMDB cache).
+    finalize_download_path(DATA_DIR, fix_children=False)
 
 
 def _save_json_file(path: str, data: object) -> None:
@@ -955,6 +2169,35 @@ def clear_credentials() -> None:
         pass
 
 
+def default_ui_prefs() -> dict:
+    return {"mode": "manual", "content": "movies"}
+
+
+def load_ui_prefs() -> dict:
+    defaults = default_ui_prefs()
+    data = load_json_file(UI_PREFS_FILE, defaults)
+    if not isinstance(data, dict):
+        return defaults
+    mode = data.get("mode", defaults["mode"])
+    content = data.get("content", defaults["content"])
+    if mode not in ("manual", "strm", "duration", "auto"):
+        mode = defaults["mode"]
+    if content not in ("movies", "series"):
+        content = defaults["content"]
+    return {"mode": mode, "content": content}
+
+
+def save_ui_prefs(prefs: dict) -> None:
+    current = load_ui_prefs()
+    mode = prefs.get("mode", current["mode"])
+    content = prefs.get("content", current["content"])
+    if mode not in ("manual", "strm", "duration", "auto"):
+        mode = current["mode"]
+    if content not in ("movies", "series"):
+        content = current["content"]
+    _save_json_file(UI_PREFS_FILE, {"mode": mode, "content": content})
+
+
 def default_auto_download_config() -> dict:
     return {
         "enabled": False,
@@ -971,6 +2214,10 @@ def default_auto_download_config() -> dict:
         "poll_interval_seconds": int(os.environ.get("AUTO_POLL_INTERVAL_SECONDS", "20")),
         "prompt_delete_completed": True,
         "allow_4k": False,
+        "jellyfin_series_root": "/media/tv",
+        "jellyfin_movies_root": "/media/movies",
+        "emby_series_root": "/data/tv",
+        "emby_movies_root": "/data/movies",
     }
 
 
@@ -997,9 +2244,25 @@ def _migrate_auto_download_config(merged: dict, raw: dict | None = None) -> dict
     merged.setdefault("jellyfin_api_key", "")
     merged.setdefault("jellyfin_username", "")
     merged.setdefault("allow_4k", False)
+    merged.setdefault("jellyfin_series_root", "/media/tv")
+    merged.setdefault("jellyfin_movies_root", "/media/movies")
+    merged.setdefault("emby_series_root", "/data/tv")
+    merged.setdefault("emby_movies_root", "/data/movies")
     merged["emby_enabled"] = bool(merged.get("emby_enabled"))
     merged["jellyfin_enabled"] = bool(merged.get("jellyfin_enabled"))
     merged["allow_4k"] = bool(merged.get("allow_4k"))
+    for key in (
+        "jellyfin_series_root",
+        "jellyfin_movies_root",
+        "emby_series_root",
+        "emby_movies_root",
+    ):
+        merged[key] = str(merged.get(key) or "").strip() or {
+            "jellyfin_series_root": "/media/tv",
+            "jellyfin_movies_root": "/media/movies",
+            "emby_series_root": "/data/tv",
+            "emby_movies_root": "/data/movies",
+        }[key]
     return merged
 
 
@@ -1050,6 +2313,217 @@ def load_watcher_status() -> dict:
 
 def save_watcher_status(data: dict) -> None:
     _save_json_file(WATCHER_STATUS_FILE, data)
+
+
+def default_strm_sync_config() -> dict:
+    return {
+        "sync_movies": True,
+        "sync_series": True,
+        "vod_category_ids": [],
+        "series_category_ids": [],
+        "series_source": "api",
+        "movies_output": STRM_OUTPUT_MOVIES_PATH,
+        "series_output": STRM_OUTPUT_SERIES_PATH,
+        "allow_4k": False,
+        "update_existing": True,
+        "remove_missing": False,
+        "cleanup_min_ratio": 0.5,
+        "refresh_emby": False,
+        "refresh_jellyfin": False,
+        "use_tmdb": False,
+        "filter_tmdb_episodes": True,
+        "tmdb_api_key": os.environ.get("TMDB_API_KEY", ""),
+        "tmdb_language": os.environ.get("TMDB_LANGUAGE", "it-IT"),
+        "tmdb_rate_limit": int(os.environ.get("TMDB_RATE_LIMIT", "40")),
+        "exclude_terms": [],
+        "exclude_adult": True,
+        "adult_terms": list(DEFAULT_ADULT_TERMS),
+        "schedule_enabled": False,
+        "schedule_mode": "interval",
+        "schedule_interval_hours": 24,
+        "schedule_hour": 3,
+        "schedule_minute": 0,
+        "audit_new_movies_on_sync": True,
+        "push_new_movies_to_jellyfin": True,
+        "jellyfin_movies_root": "/media/movies",
+    }
+
+
+def load_strm_sync_config() -> dict:
+    defaults = default_strm_sync_config()
+    data = load_json_file(STRM_SYNC_FILE, defaults)
+    if not isinstance(data, dict):
+        return defaults
+    merged = {**defaults, **data}
+    for key in ("sync_movies", "sync_series", "allow_4k", "update_existing", "remove_missing"):
+        merged[key] = bool(merged.get(key))
+    for key in (
+        "refresh_emby",
+        "refresh_jellyfin",
+        "use_tmdb",
+        "filter_tmdb_episodes",
+        "exclude_adult",
+        "schedule_enabled",
+        "audit_new_movies_on_sync",
+        "push_new_movies_to_jellyfin",
+    ):
+        merged[key] = bool(merged.get(key))
+    merged["jellyfin_movies_root"] = str(
+        merged.get("jellyfin_movies_root") or "/media/movies"
+    ).strip() or "/media/movies"
+    vod_ids = merged.get("vod_category_ids", [])
+    series_ids = merged.get("series_category_ids", [])
+    merged["vod_category_ids"] = vod_ids if isinstance(vod_ids, list) else []
+    merged["series_category_ids"] = series_ids if isinstance(series_ids, list) else []
+    series_source = str(merged.get("series_source") or "api")
+    if series_source not in {"api", "m3u", "m3u_api_fallback"}:
+        series_source = "api"
+    merged["series_source"] = series_source
+    exclude_terms = merged.get("exclude_terms", [])
+    merged["exclude_terms"] = [str(t) for t in exclude_terms] if isinstance(exclude_terms, list) else []
+    adult_terms = merged.get("adult_terms", [])
+    if not isinstance(adult_terms, list) or not adult_terms:
+        adult_terms = list(DEFAULT_ADULT_TERMS)
+    merged["adult_terms"] = [str(t) for t in adult_terms]
+    try:
+        merged["tmdb_rate_limit"] = max(1, int(merged.get("tmdb_rate_limit", 40)))
+    except (TypeError, ValueError):
+        merged["tmdb_rate_limit"] = 40
+    try:
+        merged["cleanup_min_ratio"] = max(0.05, min(1.0, float(merged.get("cleanup_min_ratio", 0.5))))
+    except (TypeError, ValueError):
+        merged["cleanup_min_ratio"] = 0.5
+    mode = str(merged.get("schedule_mode") or "interval")
+    merged["schedule_mode"] = mode if mode in {"interval", "daily"} else "interval"
+    try:
+        merged["schedule_interval_hours"] = max(1.0, float(merged.get("schedule_interval_hours", 24)))
+    except (TypeError, ValueError):
+        merged["schedule_interval_hours"] = 24.0
+    try:
+        merged["schedule_hour"] = max(0, min(23, int(merged.get("schedule_hour", 3))))
+    except (TypeError, ValueError):
+        merged["schedule_hour"] = 3
+    try:
+        merged["schedule_minute"] = max(0, min(59, int(merged.get("schedule_minute", 0))))
+    except (TypeError, ValueError):
+        merged["schedule_minute"] = 0
+    return merged
+
+
+def save_strm_sync_config(config: dict) -> None:
+    _save_json_file(STRM_SYNC_FILE, config)
+
+
+def default_strm_sync_status() -> dict:
+    return {
+        "running": False,
+        "phase": "",
+        "progress": 0.0,
+        "progress_text": "",
+        "movies_created": 0,
+        "movies_updated": 0,
+        "movies_skipped": 0,
+        "movies_removed": 0,
+        "movies_excluded": 0,
+        "movies_unmatched": 0,
+        "episodes_created": 0,
+        "episodes_updated": 0,
+        "episodes_skipped": 0,
+        "episodes_removed": 0,
+        "episodes_tmdb_filtered": 0,
+        "dirs_removed": 0,
+        "cleanup_skipped": False,
+        "movies_errors": 0,
+        "series_created": 0,
+        "series_updated": 0,
+        "series_excluded": 0,
+        "series_unmatched": 0,
+        "series_errors": 0,
+        "series_from_m3u": 0,
+        "series_from_api": 0,
+        "series_m3u_missing": 0,
+        "tmdb_lookups": 0,
+        "tmdb_cache_hits": 0,
+        "schedule_last_run": "",
+        "schedule_next_run": "",
+        "last_error": "",
+        "last_sync": "",
+        "movies_elapsed_sec": 0.0,
+        "series_elapsed_sec": 0.0,
+        "total_elapsed_sec": 0.0,
+        "log": [],
+    }
+
+
+def load_strm_sync_status() -> dict:
+    data = load_json_file(STRM_SYNC_STATUS_FILE, default_strm_sync_status())
+    if not isinstance(data, dict):
+        return default_strm_sync_status()
+    merged = {**default_strm_sync_status(), **data}
+    log = merged.get("log", [])
+    merged["log"] = log if isinstance(log, list) else []
+    return merged
+
+
+_TMDB_FOLDER_SUFFIX_RE = re.compile(r"\s*\[tmdbid-\d+\]\s*$", re.IGNORECASE)
+
+
+def clean_strm_folder_title(folder_name: str) -> str:
+    return _TMDB_FOLDER_SUFFIX_RE.sub("", folder_name).strip() or folder_name
+
+
+def _newest_strm_mtime(folder: str) -> tuple[float, int]:
+    """Return (newest .strm mtime, count). (0.0, 0) if none."""
+    newest = 0.0
+    count = 0
+    for root, _dirs, files in os.walk(folder):
+        for name in files:
+            if not name.lower().endswith(".strm"):
+                continue
+            count += 1
+            path = os.path.join(root, name)
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            if mtime > newest:
+                newest = mtime
+    return newest, count
+
+
+def list_recent_strm_titles(root: str, limit: int = 50) -> list[dict]:
+    """Title folders under a STRM library root, newest .strm activity first."""
+    if limit < 1 or not root or not os.path.isdir(root):
+        return []
+    rows: list[tuple[float, int, str, str]] = []
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                newest, count = _newest_strm_mtime(entry.path)
+                if count < 1 or newest <= 0:
+                    continue
+                rows.append((newest, count, entry.name, entry.path))
+    except OSError:
+        return []
+    rows.sort(key=lambda item: item[0], reverse=True)
+    out: list[dict] = []
+    for mtime, count, name, _path in rows[:limit]:
+        out.append(
+            {
+                "title": clean_strm_folder_title(name),
+                "folder": name,
+                "added": datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M"),
+                "added_ts": mtime,
+                "strm_count": count,
+            }
+        )
+    return out
+
+
+def save_strm_sync_status(data: dict) -> None:
+    _save_json_file(STRM_SYNC_STATUS_FILE, data)
 
 
 def load_playback_history() -> dict:
@@ -1378,6 +2852,8 @@ def run_ytdlp(
     should_cancel=None,
     resume: bool = False,
     history_entry: dict | None = None,
+    strm_path: str | None = None,
+    delete_strm_on_success: bool = True,
 ) -> bool:
     cmd = [
         "yt-dlp",
@@ -1443,4 +2919,6 @@ def run_ytdlp(
             )
         except OSError:
             pass
+    if delete_strm_on_success:
+        finalize_after_local_download(output_path, strm_path=strm_path)
     return True

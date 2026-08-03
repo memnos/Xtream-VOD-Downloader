@@ -34,25 +34,7 @@ wsl -u root bash /home/fabio/xtream-downloader/scripts/mergerfs/setup-root.sh
 python3 scripts/mergerfs/restore_emby_libraries.py
 ```
 
-Servizi systemd: `mergerfs-movies.service`, `mergerfs-series.service`, `mergerfs.target` — **enabled** al boot.
-
-Docker (`docker.service`) **aspetta mergerfs** tramite `/etc/systemd/system/docker.service.d/mergerfs.conf`, quindi Portainer e tutti i container partono solo dopo i mount union.
-
-## Download allineati agli strm
-
-Il downloader monta in sola lettura le cartelle strm e, prima di salvare, risolve il nome cartella da lì:
-
-- Serie `The Big Bang Theory` → cartella `The Big Bang Theory (2007)` (come negli strm)
-- Stagioni → `Season 01`, `Season 02`, … (come negli strm)
-
-Variabili in `.env` del downloader:
-
-```
-MOVIES_PATH=/mnt/wsl/HDD1/Movies
-TV_PATH=/mnt/wsl/HDD1/Serie_Tv
-STRM_MOVIES_PATH=/home/fabio/m3u-editor/movies
-STRM_SERIES_PATH=/home/fabio/m3u-editor/series
-```
+Servizi systemd: `mergerfs-movies.service`, `mergerfs-series.service` — **enabled** al boot.
 
 ## Installazione manuale (prima volta)
 

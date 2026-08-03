@@ -1,4 +1,5 @@
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -9,6 +10,7 @@ from core import (
     DownloadCancelled,
     append_playback_history,
     build_episode_output,
+    finalize_after_local_download,
     find_subsequent_xtream_episodes,
     find_xtream_episode,
     load_auto_download_config,
@@ -22,6 +24,7 @@ from core import (
 from deletion import (
     add_deletion_prompt,
     find_series_download_paths,
+    scan_completed_series_prompts,
     should_prompt_series_deletion,
 )
 
@@ -109,6 +112,15 @@ class WatcherStatus:
     log: list[str] = field(default_factory=list)
 
 
+def _as_item_list(data: object) -> list:
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        items = data.get("Items")
+        return items if isinstance(items, list) else []
+    return []
+
+
 class MediaServerClient:
     """Emby and Jellyfin client (Jellyfin exposes a compatible /emby/* API)."""
 
@@ -159,6 +171,159 @@ class MediaServerClient:
             raise last_error
         raise RuntimeError(f"API request failed: {path}")
 
+    def _post(self, path: str, body: dict | None = None, params: dict | None = None) -> object:
+        headers = {"X-Emby-Token": self.api_key}
+        last_error: Exception | None = None
+        for api_path in self._request_paths(path):
+            url = f"{self.base_url}{api_path}"
+            query = {"api_key": self.api_key}
+            if params:
+                query.update(params)
+            for attempt in range(3):
+                try:
+                    response = requests.post(
+                        url,
+                        params=query,
+                        json=body if body is not None else {},
+                        headers=headers,
+                        timeout=60,
+                    )
+                    response.raise_for_status()
+                    if response.content:
+                        return response.json()
+                    return {}
+                except requests.HTTPError as exc:
+                    last_error = exc
+                    status = exc.response.status_code if exc.response is not None else 0
+                    if status in {502, 503, 504} and attempt < 2:
+                        time.sleep(1 + attempt)
+                        continue
+                    if status == 404:
+                        break
+                    raise
+                except (requests.ConnectionError, requests.Timeout) as exc:
+                    last_error = exc
+                    if attempt < 2:
+                        time.sleep(1 + attempt)
+                        continue
+                    raise
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"API request failed: {path}")
+
+    def refresh_libraries(self) -> None:
+        self._post("/emby/Library/Refresh", {})
+
+    def notify_library_paths(self, updates: list[dict]) -> None:
+        """Tell Emby/Jellyfin that media paths were created/deleted/modified."""
+        if not updates:
+            return
+        self._post("/emby/Library/Media/Updated", {"Updates": updates})
+
+    def find_movies_by_tmdb_id(self, tmdb_id: int | str) -> list[dict]:
+        try:
+            tid = int(tmdb_id)
+        except (TypeError, ValueError):
+            return []
+        if tid <= 0:
+            return []
+        data = self._get(
+            "/emby/Items",
+            {
+                "Recursive": "true",
+                "IncludeItemTypes": "Movie",
+                "AnyProviderIdEquals": f"Tmdb.{tid}",
+                "Fields": "Path,ProviderIds,Name",
+                "Limit": 20,
+            },
+        )
+        return _as_item_list(data)
+
+    def find_series_by_tmdb_id(self, tmdb_id: int | str) -> list[dict]:
+        try:
+            tid = int(tmdb_id)
+        except (TypeError, ValueError):
+            return []
+        if tid <= 0:
+            return []
+        data = self._get(
+            "/emby/Items",
+            {
+                "Recursive": "true",
+                "IncludeItemTypes": "Series",
+                "AnyProviderIdEquals": f"Tmdb.{tid}",
+                "Fields": "Path,ProviderIds,Name",
+                "Limit": 20,
+            },
+        )
+        items = _as_item_list(data)
+        # Jellyfin often ignores AnyProviderIdEquals; keep only exact TMDB matches.
+        matched = [
+            item
+            for item in items
+            if str((item.get("ProviderIds") or {}).get("Tmdb") or "") == str(tid)
+        ]
+        return matched
+
+    def find_series_near_path(
+        self,
+        series_path: str,
+        *,
+        tmdb_id: int | str | None = None,
+    ) -> list[dict]:
+        """Resolve a Series item by library path (and optional TMDB id)."""
+        target = (series_path or "").replace("\\", "/").rstrip("/")
+        if not target:
+            return []
+        folder_name = target.rsplit("/", 1)[-1]
+        search = re.sub(r"\s*\[tmdbid-\d+\]\s*$", "", folder_name, flags=re.IGNORECASE).strip()
+        # Jellyfin SearchTerm fails with trailing "(Year)" — strip it for lookup.
+        search = re.sub(r"\s*\(\d{4}\)\s*$", "", search).strip() or search
+        data = self._get(
+            "/emby/Items",
+            {
+                "Recursive": "true",
+                "IncludeItemTypes": "Series",
+                "SearchTerm": search or folder_name,
+                "Fields": "Path,ProviderIds,Name",
+                "Limit": 25,
+            },
+        )
+        items = _as_item_list(data)
+        exact = [
+            item
+            for item in items
+            if str(item.get("Path") or "").replace("\\", "/").rstrip("/") == target
+        ]
+        if exact:
+            return exact
+        try:
+            tid = int(tmdb_id) if tmdb_id is not None else 0
+        except (TypeError, ValueError):
+            tid = 0
+        if tid > 0:
+            by_tmdb = [
+                item
+                for item in items
+                if str((item.get("ProviderIds") or {}).get("Tmdb") or "") == str(tid)
+            ]
+            if by_tmdb:
+                return by_tmdb
+            return self.find_series_by_tmdb_id(tid)
+        return []
+
+    def refresh_item_metadata(self, item_id: str, *, replace_all: bool = True) -> None:
+        flag = "true" if replace_all else "false"
+        self._post(
+            f"/emby/Items/{item_id}/Refresh",
+            None,
+            params={
+                "MetadataRefreshMode": "FullRefresh",
+                "ImageRefreshMode": "FullRefresh",
+                "ReplaceAllMetadata": flag,
+                "ReplaceAllImages": flag,
+            },
+        )
     def test_connection(self, username: str) -> tuple[bool, str]:
         try:
             users = self._get("/emby/Users")
@@ -204,7 +369,7 @@ class MediaServerClient:
 
     def get_sessions(self) -> list:
         data = self._get("/emby/Sessions")
-        return data if isinstance(data, list) else []
+        return _as_item_list(data)
 
     def get_series_episodes(self, user_id: str, series_id: str, include_user_data: bool = False) -> list:
         fields = "Path,ParentIndexNumber,IndexNumber,SeriesName,Id"
@@ -214,7 +379,56 @@ class MediaServerClient:
             f"/emby/Shows/{series_id}/Episodes",
             {"UserId": user_id, "Fields": fields},
         )
-        return data if isinstance(data, list) else []
+        return _as_item_list(data)
+
+    def get_played_episodes(self, user_id: str, page_size: int = 500) -> list:
+        """All played episodes for a user (paginated)."""
+        items: list = []
+        start = 0
+        page_size = max(50, min(int(page_size or 500), 1000))
+        while True:
+            data = self._get(
+                f"/emby/Users/{user_id}/Items",
+                {
+                    "Recursive": "true",
+                    "IncludeItemTypes": "Episode",
+                    "Filters": "IsPlayed",
+                    "Fields": "Path,ParentIndexNumber,IndexNumber,SeriesName,SeriesId",
+                    "SortBy": "DatePlayed",
+                    "SortOrder": "Descending",
+                    "StartIndex": start,
+                    "Limit": page_size,
+                },
+            )
+            batch = _as_item_list(data)
+            if not batch:
+                break
+            items.extend(batch)
+            total = 0
+            if isinstance(data, dict):
+                try:
+                    total = int(data.get("TotalRecordCount") or 0)
+                except (TypeError, ValueError):
+                    total = 0
+            start += len(batch)
+            if total and start >= total:
+                break
+            if len(batch) < page_size:
+                break
+        return items
+
+    def search_series(self, user_id: str, search_term: str, limit: int = 10) -> list:
+        data = self._get(
+            f"/emby/Users/{user_id}/Items",
+            {
+                "Recursive": "true",
+                "IncludeItemTypes": "Series",
+                "SearchTerm": search_term,
+                "Fields": "Name,OriginalTitle",
+                "Limit": limit,
+            },
+        )
+        return _as_item_list(data)
 
     def get_item(self, user_id: str, item_id: str, fields: str = "Path") -> dict | None:
         data = self._get(
@@ -235,6 +449,7 @@ EmbyClient = MediaServerClient
 
 class AutoDownloadWatcher:
     MAX_LOG_LINES = 80
+    DELETION_SCAN_INTERVAL = 3600
 
     def __init__(self):
         self._lock = threading.RLock()
@@ -254,6 +469,7 @@ class AutoDownloadWatcher:
         self._download_context: dict | None = None
         self._last_progress_persist = 0.0
         self._session_cache: dict[str, tuple[tuple[str, str, str, str], MediaSession]] = {}
+        self._last_deletion_scan = 0.0
 
     def _status_snapshot(self) -> dict:
         cooldown = max(0, int(self._cooldown_until - time.time()))
@@ -408,6 +624,21 @@ class AutoDownloadWatcher:
         sessions = self._build_media_sessions(config)
         if not sessions:
             return
+
+        if config.get("prompt_delete_completed", True):
+            now = time.time()
+            if now - self._last_deletion_scan >= self.DELETION_SCAN_INTERVAL:
+                self._last_deletion_scan = now
+                for session in sessions:
+                    try:
+                        added = scan_completed_series_prompts(session.client, session.user_id)
+                        if added:
+                            self._log(
+                                f"Scan serie completate ({session.client.display_name}): "
+                                f"{added} in attesa eliminazione"
+                            )
+                    except Exception as exc:
+                        self._log(f"Scan eliminazione serie ({session.client.display_name}): {exc}")
 
         playing, active_session = self._find_active_playback(sessions, host)
         if playing and active_session:
@@ -588,7 +819,14 @@ class AutoDownloadWatcher:
             strm_path=item.strm_path or None,
         )
         if os.path.exists(output_file):
-            self._log(f"Già presente, salto: {item.label}")
+            result = finalize_after_local_download(
+                output_file, strm_path=item.strm_path or None
+            )
+            notify = ", ".join(result.get("notify") or [])
+            self._log(
+                f"Già presente, salto: {item.label}"
+                + (f" ({notify})" if notify else "")
+            )
             with self._lock:
                 self._queued_keys.discard(f"{item.series_name}:{item.season}:{item.episode}")
             return None
@@ -646,6 +884,7 @@ class AutoDownloadWatcher:
                 should_cancel=should_cancel,
                 resume=resume,
                 progress_callback=on_progress,
+                strm_path=job.item.strm_path or None,
                 history_entry={
                     "key": key,
                     "type": "Series",

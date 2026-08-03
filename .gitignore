@@ -21,6 +21,14 @@ Thumbs.db
 # Docker overrides with personal paths
 docker-compose.override.yml
 .env
+.env.*
 
-# Downloads (local test folders)
+# Downloads / local library / test artifacts
 downloads/
+strm-test/
+benchmark/
+*.bak*
+*.bak-*
+
+# Cursor / editor
+.cursor/

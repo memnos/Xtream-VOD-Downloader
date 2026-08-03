@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EMBY_DIR=/home/fabio/emby
 DOWNLOADER_ENV=/home/fabio/xtream-downloader/.env
 
-echo "=== 1/5 Migrazione serie HDD2 -> HDD1 (se presenti) ==="
+echo "=== 1/5 Migrazione serie HDD2 -> HDD1 ==="
 if [[ "${SKIP_MIGRATE:-0}" == "1" ]]; then
   echo "SKIP_MIGRATE=1: migrazione saltata"
 elif pgrep -x rsync >/dev/null 2>&1; then
@@ -24,14 +24,9 @@ echo "=== 3/5 Aggiornamento docker-compose Emby ==="
 cp "${ROOT}/emby-docker-compose.yml" "${EMBY_DIR}/docker-compose.yml"
 
 echo ""
-echo "=== 4/5 Downloader: TV2 -> HDD1 ==="
 if [[ -f "${DOWNLOADER_ENV}" ]]; then
-  if grep -q '^TV2_PATH=' "${DOWNLOADER_ENV}"; then
-    sed -i 's|^TV2_PATH=.*|TV2_PATH=/mnt/wsl/HDD1/Serie_Tv|' "${DOWNLOADER_ENV}"
   else
-    echo 'TV2_PATH=/mnt/wsl/HDD1/Serie_Tv' >> "${DOWNLOADER_ENV}"
   fi
-  grep TV2_PATH "${DOWNLOADER_ENV}" || true
 fi
 
 echo ""

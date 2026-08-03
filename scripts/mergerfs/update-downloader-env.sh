@@ -10,5 +10,3 @@ set_kv() {
 }
 set_kv STRM_MOVIES_PATH /home/fabio/m3u-editor/movies
 set_kv STRM_SERIES_PATH /home/fabio/m3u-editor/series
-set_kv TV2_PATH /mnt/wsl/HDD1/Serie_Tv
-grep -E 'MOVIES_PATH|TV_PATH|TV2_PATH|STRM' "$ENV"

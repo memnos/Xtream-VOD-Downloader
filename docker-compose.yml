@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   xtream-downloader:
     build: .
@@ -11,10 +9,11 @@ services:
       - ./.data:/app/.data
       - ${MOVIES_PATH:-./downloads/movies}:/download/movies
       - ${TV_PATH:-./downloads/tv}:/download/tv
-      - ${TV2_PATH:-./downloads/tv2}:/download/tv-2
-      # Solo lettura: nomi cartelle allineati agli strm
-      - ${STRM_MOVIES_PATH:-./strm/movies}:/strm/movies:ro
-      - ${STRM_SERIES_PATH:-./strm/series}:/strm/series:ro
+      # Lettura nomi cartelle esistenti + scrittura libreria .strm (sync dalla Web UI)
+      - ${STRM_MOVIES_PATH:-./strm/movies}:/strm/movies
+      - ${STRM_SERIES_PATH:-./strm/series}:/strm/series
+      # Cartella di test per generare/validare prima di promuovere in produzione
+      - ${STRM_TEST_PATH:-./strm-test}:/strm-test
     environment:
       - TZ=${TZ:-UTC}
       - PUID=${PUID:-1000}
@@ -22,5 +21,9 @@ services:
       - UI_LANG=${UI_LANG:-en}
       - STRM_MOVIES_PATH=/strm/movies
       - STRM_SERIES_PATH=/strm/series
+      - STRM_OUTPUT_MOVIES_PATH=/strm/movies
+      - STRM_OUTPUT_SERIES_PATH=/strm/series
+      - TMDB_API_KEY=${TMDB_API_KEY:-}
+      - TMDB_LANGUAGE=${TMDB_LANGUAGE:-it-IT}
       - STREAMLIT_SERVER_FILE_WATCHER_TYPE=none
     restart: unless-stopped

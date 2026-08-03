@@ -1,0 +1,27 @@
+[Unit]
+After=wsl-hdd-mount.service
+Requires=wsl-hdd-mount.service
+Description=mergerfs Movies (HDD1 + m3u-editor strm)
+After=local-fs.target network-online.target
+Before=docker.service containerd.service mergerfs.target
+PartOf=mergerfs.target
+RequiresMountsFor=/mnt/wsl/HDD1
+# Non bloccarsi mai sul rate-limit "Start request repeated too quickly"
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Pulisce un eventuale mount FUSE rimasto appeso (stale) prima di rimontare.
+# Il prefisso '-' rende l'errore non fatale quando non c'e' nulla da smontare.
+ExecStartPre=-/bin/umount -l /mnt/wsl/union/Movies
+ExecStartPre=/bin/mkdir -p /mnt/wsl/union/Movies
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do mountpoint -q /mnt/wsl/HDD1 && test -d /mnt/wsl/HDD1/Movies && exit 0; sleep 1; done; echo "HDD1 o Movies non pronti"; exit 1'
+ExecStart=/usr/bin/mergerfs -o allow_other,use_ino,category.create=ff,minfreespace=4G,fsname=mergerfs_Movies /mnt/wsl/HDD1/Movies:/home/fabio/m3u-editor/movies /mnt/wsl/union/Movies
+ExecStop=/usr/bin/fusermount3 -u /mnt/wsl/union/Movies
+# Se mergerfs muore, riprova da solo
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target mergerfs.target
