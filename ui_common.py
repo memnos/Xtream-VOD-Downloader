@@ -80,6 +80,7 @@ def get_api(url, params, timeout: int = 60):
         st.error(f"{exc}\n\n{t('api_hint')}")
         return None
 
+@st.cache_data(ttl=600, show_spinner=False)
 def fetch_vod_categories(host: str, user: str, pw: str) -> list:
     try:
         data = request_xtream_api(
@@ -92,6 +93,8 @@ def fetch_vod_categories(host: str, user: str, pw: str) -> list:
     except RuntimeError:
         return []
 
+
+@st.cache_data(ttl=600, show_spinner=False)
 def fetch_series_categories(host: str, user: str, pw: str) -> list:
     try:
         data = request_xtream_api(
@@ -104,6 +107,8 @@ def fetch_series_categories(host: str, user: str, pw: str) -> list:
     except RuntimeError:
         return []
 
+
+@st.cache_data(ttl=600, show_spinner=False)
 def fetch_catalog(host: str, user: str, pw: str, action: str, category_id: str | None):
     params = {"username": user, "password": pw, "action": action}
     if category_id is not None:
