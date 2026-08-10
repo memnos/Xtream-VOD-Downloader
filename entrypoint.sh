@@ -15,6 +15,7 @@ if [ "$(id -u)" = "0" ]; then
 fi
 
 python /app/watcher_daemon.py &
+python /app/stream_proxy.py &
 exec streamlit run /app/app.py \
   --server.port=8501 \
   --server.address=0.0.0.0 \

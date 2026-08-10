@@ -4,6 +4,7 @@ import re
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -91,6 +92,8 @@ VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts", ".webm"}
 
 # Suffix in downloaded filenames — easy to spot local files vs .strm in the media library UI.
 LOCAL_DOWNLOAD_MARKER = " [LOCAL]"
+# Sidecar next to a movie [LOCAL] download: preserves Xtream URL so .strm can be restored.
+MOVIE_STRM_URL_SIDECAR = ".xtream-strm-url"
 
 
 def url_hostname(url: str) -> str:
@@ -111,14 +114,19 @@ def read_strm_url(path: str) -> str | None:
 
 def playback_blocks_xtream_download(item_path: str, xtream_host: str) -> bool:
     xtream_domain = url_hostname(xtream_host)
-    if not xtream_domain or not item_path:
+    if not item_path:
         return False
 
     path_lower = item_path.lower()
     if path_lower.endswith(".strm"):
         strm_url = read_strm_url(item_path)
         if strm_url:
-            return url_hostname(strm_url) == xtream_domain
+            # Proxy .strm counts as remote playback (pause background downloads).
+            if "/p/movie/" in strm_url.lower() or "/p/episode/" in strm_url.lower():
+                return True
+            if xtream_domain and url_hostname(strm_url) == xtream_domain:
+                return True
+            return False
         return True
 
     ext = os.path.splitext(item_path)[1].lower()
@@ -1267,10 +1275,139 @@ def _remove_path_and_sidecars(media_path: str) -> list[str]:
     return removed
 
 
+def movie_download_dir(local_path: str) -> str:
+    """Return the movie folder for a local download or any path inside it.
+
+    Always treats a path that looks like a media/sidecar file as a file path even
+    when it does not exist yet (so we never mkdir the ``.mkv`` basename by mistake).
+    """
+    path = os.path.realpath(local_path) if local_path else ""
+    if not path:
+        return ""
+    if os.path.isdir(path):
+        # Guard: a previous bug created dirs named like ``Title [LOCAL].mkv``.
+        base = os.path.basename(path).lower()
+        if any(base.endswith(ext) for ext in VIDEO_EXTENSIONS) or base.endswith(".strm"):
+            return os.path.dirname(path)
+        return path
+    return os.path.dirname(path)
+
+
+def ensure_movie_output_is_file(output_file: str) -> None:
+    """If output_file wrongly exists as a directory, remove it so yt-dlp can write."""
+    if not output_file:
+        return
+    try:
+        if os.path.isdir(output_file):
+            import shutil
+
+            shutil.rmtree(output_file)
+    except OSError:
+        pass
+
+
+def growing_download_bytes(output_path: str) -> int:
+    """Bytes on disk for an in-progress yt-dlp download (final file and/or ``.part``)."""
+    if not output_path:
+        return 0
+    total = 0
+    for path in (output_path, f"{output_path}.part"):
+        try:
+            if os.path.isfile(path):
+                total = max(total, os.path.getsize(path))
+        except OSError:
+            continue
+    return total
+
+
+def write_movie_strm_url_sidecar(
+    local_path: str,
+    url: str,
+    *,
+    strm_path: str | None = None,
+) -> str | None:
+    """Persist Xtream URL so a movie .strm can be restored after the local file is removed."""
+    url = (url or "").strip()
+    if not url:
+        return None
+    directory = movie_download_dir(local_path)
+    if not directory:
+        return None
+    try:
+        prepare_output_dir(directory)
+    except OSError:
+        pass
+    payload = {
+        "url": url,
+        "strm_path": os.path.realpath(strm_path) if strm_path else "",
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    sidecar = os.path.join(directory, MOVIE_STRM_URL_SIDECAR)
+    try:
+        with open(sidecar, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        return sidecar
+    except OSError:
+        return None
+
+
+def read_movie_strm_url_sidecar(local_path: str) -> dict:
+    """Load sidecar written by write_movie_strm_url_sidecar (empty dict if missing)."""
+    directory = movie_download_dir(local_path)
+    sidecar = os.path.join(directory, MOVIE_STRM_URL_SIDECAR)
+    data = load_json_file(sidecar, {})
+    return data if isinstance(data, dict) else {}
+
+
+def resolve_movie_strm_restore_path(
+    local_path: str,
+    *,
+    strm_path: str | None = None,
+) -> str:
+    """Preferred .strm path to recreate for a movie local download."""
+    if strm_path:
+        return os.path.realpath(strm_path)
+    meta = read_movie_strm_url_sidecar(local_path)
+    saved = str(meta.get("strm_path") or "").strip()
+    if saved:
+        return os.path.realpath(saved)
+    movie_folder = os.path.basename(movie_download_dir(local_path))
+    folder = os.path.join(STRM_OUTPUT_MOVIES_PATH, movie_folder)
+    if not os.path.isdir(folder):
+        match = find_strm_folder_match(STRM_OUTPUT_MOVIES_PATH, movie_folder)
+        if match:
+            folder = os.path.join(STRM_OUTPUT_MOVIES_PATH, match)
+            movie_folder = match
+    return os.path.join(folder, f"{movie_folder}.strm")
+
+
+def is_media_considered_watched(
+    *,
+    played: bool | None = None,
+    position_ticks: int = 0,
+    run_time_ticks: int = 0,
+    threshold: float = 0.90,
+) -> bool:
+    """True when Emby/JF marked Played, or playhead is past the watched threshold."""
+    if played:
+        return True
+    runtime = int(run_time_ticks or 0)
+    position = int(position_ticks or 0)
+    if runtime <= 0 or position <= 0:
+        return False
+    try:
+        cut = float(threshold)
+    except (TypeError, ValueError):
+        cut = 0.90
+    cut = min(0.99, max(0.5, cut))
+    return (position / runtime) >= cut
+
+
 def delete_strm_after_local_download(
     local_path: str,
     *,
     strm_path: str | None = None,
+    strm_url: str | None = None,
 ) -> list[str]:
     """Delete .strm files (and sidecars) superseded by a completed local download."""
     candidates: list[str] = []
@@ -1280,6 +1417,7 @@ def delete_strm_after_local_download(
 
     deleted: list[str] = []
     seen: set[str] = set()
+    saved_url = (strm_url or "").strip()
     for path in candidates:
         real = os.path.realpath(path)
         if real in seen or not real.lower().endswith(".strm"):
@@ -1287,8 +1425,123 @@ def delete_strm_after_local_download(
         seen.add(real)
         if not os.path.isfile(real):
             continue
+        if not saved_url:
+            saved_url = read_strm_url(real) or ""
+        # Prefer Xtream URL from sidecar if .strm already points at the local proxy.
+        if saved_url and "/p/movie/" in saved_url.lower():
+            meta = read_movie_strm_url_sidecar(local_path)
+            remote = str(meta.get("url") or "").strip()
+            if remote and "/p/movie/" not in remote.lower():
+                saved_url = remote
+        # Movies only: keep URL so we can restore .strm after the title is watched.
+        if saved_url and parse_episode_numbers_from_path(local_path) is None:
+            if "/p/movie/" not in saved_url.lower():
+                write_movie_strm_url_sidecar(local_path, saved_url, strm_path=real)
         deleted.extend(_remove_path_and_sidecars(real))
+    if saved_url and parse_episode_numbers_from_path(local_path) is None:
+        if "/p/movie/" not in saved_url.lower():
+            write_movie_strm_url_sidecar(local_path, saved_url, strm_path=strm_path)
     return deleted
+
+
+def delete_movie_local_and_restore_strm(
+    local_path: str,
+    *,
+    strm_url: str | None = None,
+    strm_path: str | None = None,
+    notify: bool = True,
+) -> dict:
+    """Delete a movie [LOCAL] download and recreate its .strm (HDD cleanup after watched)."""
+    result: dict = {
+        "local_deleted": [],
+        "strm_path": "",
+        "strm_restored": False,
+        "notify": [],
+        "errors": [],
+    }
+    local_path = os.path.realpath(local_path)
+    if not local_path or not os.path.exists(local_path):
+        # Still try restore if only sidecars / folder remain.
+        pass
+    if parse_episode_numbers_from_path(local_path) is not None:
+        result["errors"].append("not_a_movie")
+        return result
+
+    meta = read_movie_strm_url_sidecar(local_path)
+    remote = (strm_url or str(meta.get("url") or "")).strip()
+    # Sidecar must keep the Xtream URL, not a proxy URL.
+    if remote and "/p/movie/" in remote.lower():
+        remote = ""
+    target_strm = resolve_movie_strm_restore_path(
+        local_path, strm_path=strm_path or str(meta.get("strm_path") or "") or None
+    )
+    result["strm_path"] = target_strm
+
+    if not remote:
+        result["errors"].append("strm_url_missing")
+        return result
+
+    # Restore .strm to progressive proxy URL when enabled, else direct Xtream URL.
+    folder_name = os.path.basename(movie_download_dir(local_path))
+    try:
+        from stream_proxy import resolve_movie_play_url, stream_proxy_enabled
+
+        play_url = resolve_movie_play_url(
+            folder_name=folder_name,
+            remote_url=remote,
+            strm_path=target_strm,
+            ext=os.path.splitext(local_path)[1].lstrip(".") or "mkv",
+        )
+    except Exception:
+        play_url = remote
+
+    try:
+        prepare_output_dir(os.path.dirname(target_strm))
+        write_strm(target_strm, play_url)
+        write_movie_strm_url_sidecar(local_path, remote, strm_path=target_strm)
+        result["strm_restored"] = True
+    except Exception as exc:  # noqa: BLE001
+        result["errors"].append(f"strm_restore:{exc}")
+        return result
+
+    removed: list[str] = []
+    directory = movie_download_dir(local_path)
+    # Delete video + same-basename sidecars.
+    if os.path.isfile(local_path):
+        removed.extend(_remove_path_and_sidecars(local_path))
+    if os.path.isdir(directory):
+        try:
+            for name in os.listdir(directory):
+                full = os.path.join(directory, name)
+                if not os.path.isfile(full):
+                    continue
+                lower = name.lower()
+                if lower == MOVIE_STRM_URL_SIDECAR.lower():
+                    try:
+                        os.remove(full)
+                        removed.append(full)
+                    except OSError:
+                        pass
+                    continue
+                ext = os.path.splitext(lower)[1]
+                if ext in VIDEO_EXTENSIONS or LOCAL_DOWNLOAD_MARKER.lower() in lower:
+                    removed.extend(_remove_path_and_sidecars(full))
+        except OSError as exc:
+            result["errors"].append(f"local_cleanup:{exc}")
+        # Remove empty movie folder under /download/movies.
+        try:
+            if os.path.isdir(directory) and not os.listdir(directory):
+                os.rmdir(directory)
+                removed.append(directory)
+        except OSError:
+            pass
+
+    result["local_deleted"] = removed
+    if notify:
+        result["notify"] = notify_media_servers_after_local_download(
+            target_strm, deleted_paths=removed
+        )
+    return result
 
 
 def _episode_nfo_matches(filename: str, season: int, episode: int) -> bool:
@@ -1418,6 +1671,28 @@ def align_episode_nfo_after_local_download(local_path: str) -> dict:
     return align_episode_nfo_to_media(local_path)
 
 
+def _media_server_path_mappings(
+    *,
+    server: str,
+    config: dict | None = None,
+) -> list[tuple[str, str]]:
+    """Pairs of (local_root, server_root) for Emby/Jellyfin path translation."""
+    cfg = config if isinstance(config, dict) else load_auto_download_config()
+    server_key = (server or "").lower()
+    if server_key == "jellyfin":
+        series_dst = str(cfg.get("jellyfin_series_root") or "/media/tv").rstrip("/")
+        movies_dst = str(cfg.get("jellyfin_movies_root") or "/media/movies").rstrip("/")
+    else:
+        series_dst = str(cfg.get("emby_series_root") or "/data/tv").rstrip("/")
+        movies_dst = str(cfg.get("emby_movies_root") or "/data/movies").rstrip("/")
+    return [
+        (DOWNLOAD_TV_PATH.rstrip("/"), series_dst),
+        (STRM_OUTPUT_SERIES_PATH.rstrip("/"), series_dst),
+        (DOWNLOAD_MOVIES_PATH.rstrip("/"), movies_dst),
+        (STRM_OUTPUT_MOVIES_PATH.rstrip("/"), movies_dst),
+    ]
+
+
 def map_local_path_to_media_server(
     path: str,
     *,
@@ -1427,23 +1702,8 @@ def map_local_path_to_media_server(
     """Map xtream-downloader library path to Emby/Jellyfin container path."""
     if not path:
         return None
-    cfg = config if isinstance(config, dict) else load_auto_download_config()
-    server_key = (server or "").lower()
-    if server_key == "jellyfin":
-        series_dst = str(cfg.get("jellyfin_series_root") or "/media/tv").rstrip("/")
-        movies_dst = str(cfg.get("jellyfin_movies_root") or "/media/movies").rstrip("/")
-    else:
-        series_dst = str(cfg.get("emby_series_root") or "/data/tv").rstrip("/")
-        movies_dst = str(cfg.get("emby_movies_root") or "/data/movies").rstrip("/")
-
     normalized = path.replace("\\", "/")
-    mappings = (
-        (DOWNLOAD_TV_PATH.rstrip("/"), series_dst),
-        (STRM_OUTPUT_SERIES_PATH.rstrip("/"), series_dst),
-        (DOWNLOAD_MOVIES_PATH.rstrip("/"), movies_dst),
-        (STRM_OUTPUT_MOVIES_PATH.rstrip("/"), movies_dst),
-    )
-    for src, dst in mappings:
+    for src, dst in _media_server_path_mappings(server=server, config=config):
         if not src or not dst:
             continue
         if normalized == src:
@@ -1459,6 +1719,38 @@ def map_local_path_to_media_server(
             return dst
         if real_path.startswith(real_src + "/"):
             return dst + real_path[len(real_src) :]
+    return None
+
+
+def map_media_server_path_to_local(
+    path: str,
+    *,
+    server: str,
+    config: dict | None = None,
+) -> str | None:
+    """Map Emby/Jellyfin item Path back to a path readable in this container."""
+    if not path:
+        return None
+    normalized = path.replace("\\", "/")
+    if os.path.isfile(normalized):
+        return normalized
+    # Prefer strm roots before download roots when both could match.
+    mappings = _media_server_path_mappings(server=server, config=config)
+    ordered = sorted(
+        mappings,
+        key=lambda pair: 0 if "strm" in pair[0].lower() else 1,
+    )
+    for src, dst in ordered:
+        if not src or not dst:
+            continue
+        if normalized == dst:
+            candidate = src
+        elif normalized.startswith(dst + "/"):
+            candidate = src + normalized[len(dst) :]
+        else:
+            continue
+        if os.path.exists(candidate):
+            return candidate
     return None
 
 
@@ -1597,10 +1889,13 @@ def finalize_after_local_download(
     local_path: str,
     *,
     strm_path: str | None = None,
+    strm_url: str | None = None,
     notify: bool = True,
 ) -> dict:
     """Post-download cleanup: remove superseded .strm, align NFOs, notify JF/Emby."""
-    deleted = delete_strm_after_local_download(local_path, strm_path=strm_path)
+    deleted = delete_strm_after_local_download(
+        local_path, strm_path=strm_path, strm_url=strm_url
+    )
     nfo = align_episode_nfo_after_local_download(local_path)
     notify_notes: list[str] = []
     if notify:
@@ -2180,7 +2475,7 @@ def load_ui_prefs() -> dict:
         return defaults
     mode = data.get("mode", defaults["mode"])
     content = data.get("content", defaults["content"])
-    if mode not in ("manual", "strm", "duration", "auto"):
+    if mode not in ("manual", "strm", "duration", "auto", "assist"):
         mode = defaults["mode"]
     if content not in ("movies", "series"):
         content = defaults["content"]
@@ -2191,7 +2486,7 @@ def save_ui_prefs(prefs: dict) -> None:
     current = load_ui_prefs()
     mode = prefs.get("mode", current["mode"])
     content = prefs.get("content", current["content"])
-    if mode not in ("manual", "strm", "duration", "auto"):
+    if mode not in ("manual", "strm", "duration", "auto", "assist"):
         mode = current["mode"]
     if content not in ("movies", "series"):
         content = current["content"]
@@ -2213,12 +2508,50 @@ def default_auto_download_config() -> dict:
         "cooldown_seconds": int(os.environ.get("AUTO_COOLDOWN_SECONDS", "90")),
         "poll_interval_seconds": int(os.environ.get("AUTO_POLL_INTERVAL_SECONDS", "20")),
         "prompt_delete_completed": True,
+        "continue_download_incomplete": True,
         "allow_4k": False,
+        "prefetch_playing_strm": False,
+        "prefetch_buffer_mb": 20,
+        "prefetch_buffer_seconds": 120,
+        "prefetch_min_speed_ratio": 1.3,
+        "prefetch_max_wait_seconds": 180,
+        "prefetch_auto_switch": True,
+        "cleanup_watched_movie_downloads": True,
+        "watched_movie_threshold": 0.90,
+        "stream_proxy_enabled": True,
+        "stream_proxy_host": os.environ.get("STREAM_PROXY_HOST", ""),
+        "stream_proxy_port": int(os.environ.get("STREAM_PROXY_PORT", "8510")),
+        "stream_proxy_download": False,
         "jellyfin_series_root": "/media/tv",
         "jellyfin_movies_root": "/media/movies",
         "emby_series_root": "/data/tv",
         "emby_movies_root": "/data/movies",
+        "auto_intro_skip_enabled": False,
+        "auto_intro_skip_download": True,
+        "auto_intro_skip_keep_until_watched": False,
+        "auto_subs_enabled": False,
+        "auto_subs_prefer_forced": True,
+        "auto_subs_language": "it",
+        "opensubtitles_username": os.environ.get("OPENSUBTITLES_USERNAME", ""),
+        "opensubtitles_password": os.environ.get("OPENSUBTITLES_PASSWORD", ""),
+        "opensubtitles_api_key": os.environ.get(
+            "OPENSUBTITLES_API_KEY", "gUCLWGoAg2PmyseoTM0INFFVPcDCeDlT"
+        ),
+        "opensubtitles_jf_config": os.environ.get(
+            "OPENSUBTITLES_JF_CONFIG",
+            "/config/Jellyfin.Plugin.OpenSubtitles.xml",
+        ),
     }
+
+
+def watcher_should_run(config: dict | None = None) -> bool:
+    """True when auto-download or playback-assist features need the watcher."""
+    cfg = config if isinstance(config, dict) else load_auto_download_config()
+    return bool(
+        cfg.get("enabled")
+        or cfg.get("auto_intro_skip_enabled")
+        or cfg.get("auto_subs_enabled")
+    )
 
 
 def _migrate_auto_download_config(merged: dict, raw: dict | None = None) -> dict:
@@ -2244,13 +2577,93 @@ def _migrate_auto_download_config(merged: dict, raw: dict | None = None) -> dict
     merged.setdefault("jellyfin_api_key", "")
     merged.setdefault("jellyfin_username", "")
     merged.setdefault("allow_4k", False)
+    merged.setdefault("continue_download_incomplete", True)
+    merged.setdefault("prefetch_playing_strm", False)
+    merged.setdefault("prefetch_buffer_mb", 20)
+    merged.setdefault("prefetch_buffer_seconds", 120)
+    merged.setdefault("prefetch_min_speed_ratio", 1.3)
+    merged.setdefault("prefetch_max_wait_seconds", 180)
+    merged.setdefault("prefetch_auto_switch", True)
+    merged.setdefault("cleanup_watched_movie_downloads", True)
+    merged.setdefault("watched_movie_threshold", 0.90)
+    merged.setdefault("stream_proxy_enabled", True)
+    merged.setdefault("stream_proxy_host", "")
+    merged.setdefault("stream_proxy_port", 8510)
+    merged.setdefault("stream_proxy_download", False)
     merged.setdefault("jellyfin_series_root", "/media/tv")
     merged.setdefault("jellyfin_movies_root", "/media/movies")
     merged.setdefault("emby_series_root", "/data/tv")
     merged.setdefault("emby_movies_root", "/data/movies")
+    merged.setdefault("auto_intro_skip_enabled", False)
+    merged.setdefault("auto_intro_skip_download", True)
+    merged.setdefault("auto_intro_skip_keep_until_watched", False)
+    merged.setdefault("auto_subs_enabled", False)
+    merged.setdefault("auto_subs_prefer_forced", True)
+    merged.setdefault("auto_subs_language", "it")
+    merged.setdefault("opensubtitles_username", "")
+    merged.setdefault("opensubtitles_password", "")
+    merged.setdefault(
+        "opensubtitles_api_key",
+        "gUCLWGoAg2PmyseoTM0INFFVPcDCeDlT",
+    )
+    merged.setdefault(
+        "opensubtitles_jf_config",
+        "/config/Jellyfin.Plugin.OpenSubtitles.xml",
+    )
     merged["emby_enabled"] = bool(merged.get("emby_enabled"))
     merged["jellyfin_enabled"] = bool(merged.get("jellyfin_enabled"))
     merged["allow_4k"] = bool(merged.get("allow_4k"))
+    merged["continue_download_incomplete"] = bool(merged.get("continue_download_incomplete", True))
+    merged["prefetch_playing_strm"] = bool(merged.get("prefetch_playing_strm"))
+    merged["prefetch_auto_switch"] = bool(merged.get("prefetch_auto_switch"))
+    merged["cleanup_watched_movie_downloads"] = bool(
+        merged.get("cleanup_watched_movie_downloads", True)
+    )
+    merged["stream_proxy_enabled"] = bool(merged.get("stream_proxy_enabled", True))
+    merged["stream_proxy_host"] = str(merged.get("stream_proxy_host") or "").strip()
+    merged["stream_proxy_download"] = bool(merged.get("stream_proxy_download", False))
+    merged["auto_intro_skip_enabled"] = bool(merged.get("auto_intro_skip_enabled"))
+    merged["auto_intro_skip_download"] = bool(merged.get("auto_intro_skip_download", True))
+    merged["auto_intro_skip_keep_until_watched"] = bool(
+        merged.get("auto_intro_skip_keep_until_watched")
+    )
+    merged["auto_subs_enabled"] = bool(merged.get("auto_subs_enabled"))
+    merged["auto_subs_prefer_forced"] = bool(merged.get("auto_subs_prefer_forced", True))
+    merged["auto_subs_language"] = str(merged.get("auto_subs_language") or "it").strip() or "it"
+    merged["opensubtitles_username"] = str(merged.get("opensubtitles_username") or "").strip()
+    merged["opensubtitles_password"] = str(merged.get("opensubtitles_password") or "").strip()
+    merged["opensubtitles_api_key"] = str(
+        merged.get("opensubtitles_api_key") or "gUCLWGoAg2PmyseoTM0INFFVPcDCeDlT"
+    ).strip()
+    merged["opensubtitles_jf_config"] = str(merged.get("opensubtitles_jf_config") or "").strip()
+    try:
+        merged["stream_proxy_port"] = max(
+            1, int(merged.get("stream_proxy_port") or 8510)
+        )
+    except (TypeError, ValueError):
+        merged["stream_proxy_port"] = 8510
+    try:
+        merged["watched_movie_threshold"] = min(
+            0.99, max(0.5, float(merged.get("watched_movie_threshold") or 0.90))
+        )
+    except (TypeError, ValueError):
+        merged["watched_movie_threshold"] = 0.90
+    try:
+        merged["prefetch_buffer_mb"] = max(10, int(merged.get("prefetch_buffer_mb") or 20))
+    except (TypeError, ValueError):
+        merged["prefetch_buffer_mb"] = 20
+    try:
+        merged["prefetch_buffer_seconds"] = max(30, int(merged.get("prefetch_buffer_seconds") or 120))
+    except (TypeError, ValueError):
+        merged["prefetch_buffer_seconds"] = 120
+    try:
+        merged["prefetch_max_wait_seconds"] = max(60, int(merged.get("prefetch_max_wait_seconds") or 180))
+    except (TypeError, ValueError):
+        merged["prefetch_max_wait_seconds"] = 180
+    try:
+        merged["prefetch_min_speed_ratio"] = max(1.05, float(merged.get("prefetch_min_speed_ratio") or 1.3))
+    except (TypeError, ValueError):
+        merged["prefetch_min_speed_ratio"] = 1.3
     for key in (
         "jellyfin_series_root",
         "jellyfin_movies_root",
@@ -2844,6 +3257,163 @@ class DownloadCancelled(Exception):
     pass
 
 
+@dataclass
+class PrefetchSwitchDecision:
+    action: str  # wait | switch_local | stay_strm
+    reason: str
+    buffer_seconds: float = 0.0
+    ahead_seconds: float = 0.0
+    position_seconds: float = 0.0
+    speed_bps: float = 0.0
+    bitrate_bps: float = 0.0
+    speed_ratio: float = 0.0
+    downloaded_bytes: int = 0
+    bytes_gained: int = 0
+    speed_sample_ok: bool = False
+
+
+def evaluate_prefetch_switch(
+    *,
+    downloaded_bytes: int,
+    elapsed_seconds: float,
+    bitrate_bps: int | float,
+    bytes_gained: int | None = None,
+    position_seconds: float = 0.0,
+    target_buffer_seconds: float = 120,
+    min_speed_ratio: float = 1.3,
+    min_bytes: int = 20 * 1024 * 1024,
+    max_wait_seconds: float = 180,
+    min_speed_sample_bytes: int = 5 * 1024 * 1024,
+    min_speed_sample_seconds: float = 15.0,
+) -> PrefetchSwitchDecision:
+    """Decide whether a growing local download is safe to switch to from .strm playback.
+
+    ``downloaded_bytes`` is the current local file size (coverage from the start of the file).
+    ``bytes_gained`` is used only for speed (bytes written since this download attempt started).
+    Switch requires the local file to cover *current playback position + target buffer*.
+    """
+    bitrate = float(bitrate_bps or 0)
+    if bitrate < 500_000:
+        bitrate = 1_500_000.0  # conservative fallback (~1.5 Mbps)
+    elapsed = max(float(elapsed_seconds or 0), 0.5)
+    downloaded = max(int(downloaded_bytes or 0), 0)
+    gained = downloaded if bytes_gained is None else max(int(bytes_gained or 0), 0)
+    position = max(float(position_seconds or 0), 0.0)
+    target = max(float(target_buffer_seconds or 0), 1.0)
+
+    speed_bps = gained * 8.0 / elapsed
+    ratio = speed_bps / bitrate if bitrate > 0 else 0.0
+    covered_seconds = downloaded * 8.0 / bitrate
+    ahead_seconds = covered_seconds - position
+    need_seconds = position + target
+    speed_sample_ok = gained >= int(min_speed_sample_bytes) or (
+        elapsed >= float(min_speed_sample_seconds) and gained >= 1 * 1024 * 1024
+    )
+
+    base = dict(
+        buffer_seconds=covered_seconds,
+        ahead_seconds=ahead_seconds,
+        position_seconds=position,
+        speed_bps=speed_bps,
+        bitrate_bps=bitrate,
+        speed_ratio=ratio,
+        downloaded_bytes=downloaded,
+        bytes_gained=gained,
+        speed_sample_ok=speed_sample_ok,
+    )
+
+    # Local file must cover playhead + target buffer (from byte 0 of the file).
+    covers_playback = (
+        covered_seconds >= need_seconds
+        and ahead_seconds >= target
+        and downloaded >= int(min_bytes)
+    )
+
+    if covers_playback and speed_sample_ok and ratio >= float(min_speed_ratio):
+        return PrefetchSwitchDecision(
+            action="switch_local",
+            reason=(
+                f"locale copre pos {position:.0f}s + {target:.0f}s "
+                f"(ahead {ahead_seconds:.0f}s) e download {ratio:.2f}× bitrate"
+            ),
+            **base,
+        )
+
+    if covers_playback and not speed_sample_ok:
+        # File already covers the playhead (e.g. nearly complete / fast catch-up).
+        return PrefetchSwitchDecision(
+            action="switch_local",
+            reason=(
+                f"locale già oltre la posizione ({covered_seconds:.0f}s ≥ {need_seconds:.0f}s); "
+                "switch senza attendere campione velocità"
+            ),
+            **base,
+        )
+
+    if elapsed < float(max_wait_seconds):
+        if not speed_sample_ok:
+            return PrefetchSwitchDecision(
+                action="wait",
+                reason=(
+                    f"campione velocità insufficiente "
+                    f"(guadagnati {gained / (1024 * 1024):.1f}MB in {elapsed:.0f}s)"
+                ),
+                **base,
+            )
+        return PrefetchSwitchDecision(
+            action="wait",
+            reason=(
+                f"in attesa copertura "
+                f"(locale {covered_seconds:.0f}s / serve {need_seconds:.0f}s, "
+                f"ahead {ahead_seconds:.0f}s, velocità {ratio:.2f}×)"
+            ),
+            **base,
+        )
+
+    # Max wait reached.
+    if covers_playback and ratio >= float(min_speed_ratio):
+        return PrefetchSwitchDecision(
+            action="switch_local",
+            reason=(
+                f"attesa max ma locale ok (ahead {ahead_seconds:.0f}s, {ratio:.2f}×)"
+            ),
+            **base,
+        )
+
+    if not speed_sample_ok and gained <= 0:
+        # Still connecting / writing to a temp name — do not lock stay_strm.
+        return PrefetchSwitchDecision(
+            action="wait",
+            reason=(
+                "nessun byte utile ancora su disco "
+                f"dopo {elapsed:.0f}s — continuo ad attendere"
+            ),
+            **base,
+        )
+
+    if speed_sample_ok and ratio < float(min_speed_ratio):
+        return PrefetchSwitchDecision(
+            action="stay_strm",
+            reason=(
+                f"download troppo lento ({ratio:.2f}× bitrate, "
+                f"ahead {ahead_seconds:.0f}s / serve {target:.0f}s) "
+                "— meglio restare sullo .strm"
+            ),
+            **base,
+        )
+
+    # Still catching up to playhead but not clearly too slow: keep waiting
+    # (caller may keep evaluating; do not lock stay_strm prematurely).
+    return PrefetchSwitchDecision(
+        action="wait",
+        reason=(
+            f"attesa max ma ancora in catch-up verso pos {position:.0f}s "
+            f"(locale {covered_seconds:.0f}s, {ratio:.2f}×) — continuo a scaricare"
+        ),
+        **base,
+    )
+
+
 def run_ytdlp(
     url: str,
     output_path: str,
@@ -2864,6 +3434,9 @@ def run_ytdlp(
         "detect_or_warn",
         "--newline",
         "--progress",
+        # Write into the final path so size/progress and mid-play switch see real bytes
+        # (default .part files are invisible to size checks and to the media library).
+        "--no-part",
     ]
     if resume or (os.path.exists(output_path) and os.path.getsize(output_path) > 0):
         cmd.append("--continue")
@@ -2920,5 +3493,7 @@ def run_ytdlp(
         except OSError:
             pass
     if delete_strm_on_success:
-        finalize_after_local_download(output_path, strm_path=strm_path)
+        finalize_after_local_download(
+            output_path, strm_path=strm_path, strm_url=url
+        )
     return True

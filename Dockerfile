@@ -29,7 +29,7 @@ RUN set -eux; \
     fi; \
     rm -rf ./wheels
 
-COPY app.py core.py i18n.py emby_watcher.py deletion.py watcher_daemon.py strm_sync.py strm_scheduler.py strm_seasons.py strm_duration_audit.py strm_jellyfin_push.py strm_mismatch_resolve.py discarded_movie_streams.py tmdb.py entrypoint.sh ./
+COPY app.py core.py i18n.py emby_watcher.py deletion.py continue_download.py watcher_daemon.py stream_proxy.py strm_sync.py strm_scheduler.py strm_seasons.py strm_duration_audit.py strm_jellyfin_push.py strm_mismatch_resolve.py discarded_movie_streams.py tmdb.py intro_skip.py auto_subtitles.py ui_common.py ui_manual.py ui_auto.py ui_assist.py ui_strm.py ui_duration.py entrypoint.sh ./
 
 RUN chmod +x /app/entrypoint.sh \
     && mkdir -p /app/.streamlit && printf '%s\n' \
@@ -44,6 +44,6 @@ RUN chmod +x /app/entrypoint.sh \
     'fastReruns = false' \
     > /app/.streamlit/config.toml
 
-EXPOSE 8501
+EXPOSE 8501 8510
 
 ENTRYPOINT ["/app/entrypoint.sh"]

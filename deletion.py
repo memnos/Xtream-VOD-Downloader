@@ -48,16 +48,57 @@ def _default_deletion_prompts() -> dict:
     return {"pending": [], "dismissed": []}
 
 
+def _normalize_prompt_path(path: str) -> str:
+    return os.path.realpath(str(path or "").strip())
+
+
+def _prompt_path_keys(paths: list | None) -> set[str]:
+    return {_normalize_prompt_path(p) for p in (paths or []) if str(p or "").strip()}
+
+
+def _dedupe_pending_prompts(pending: list) -> list:
+    """Keep one prompt per download folder (Emby + Jellyfin use different series ids)."""
+    unique: list = []
+    for item in pending:
+        if not isinstance(item, dict):
+            continue
+        paths = _prompt_path_keys(item.get("paths"))
+        if not paths:
+            unique.append(dict(item))
+            continue
+        existing = next((p for p in unique if _prompt_path_keys(p.get("paths")) & paths), None)
+        if existing is None:
+            unique.append(dict(item))
+            continue
+        # Merge alternate media-server ids so Yes/No clears all of them.
+        alt = list(existing.get("alternate_series_ids") or [])
+        sid = str(item.get("series_id") or "")
+        existing_sid = str(existing.get("series_id") or "")
+        if sid and sid != existing_sid and sid not in alt:
+            alt.append(sid)
+        for extra in item.get("alternate_series_ids") or []:
+            extra_s = str(extra)
+            if extra_s and extra_s != existing_sid and extra_s not in alt:
+                alt.append(extra_s)
+        existing["alternate_series_ids"] = alt
+    return unique
+
+
 def load_deletion_prompts() -> dict:
     data = load_json_file(DELETION_PROMPTS_FILE, _default_deletion_prompts())
     if not isinstance(data, dict):
         return _default_deletion_prompts()
     pending = data.get("pending", [])
     dismissed = data.get("dismissed", [])
-    return {
-        "pending": pending if isinstance(pending, list) else [],
+    pending = pending if isinstance(pending, list) else []
+    deduped = _dedupe_pending_prompts(pending)
+    result = {
+        "pending": deduped,
         "dismissed": dismissed if isinstance(dismissed, list) else [],
     }
+    if deduped != pending:
+        save_deletion_prompts(result)
+    return result
 
 
 def save_deletion_prompts(data: dict) -> None:
@@ -147,6 +188,75 @@ def should_prompt_series_deletion(episodes: list, season: int, episode: int) -> 
     )
 
 
+def _tmdb_client_for_status():
+    """Build a TMDB client from strm sync config / env, or None if unavailable."""
+    try:
+        from tmdb import TmdbClient
+    except ImportError:
+        return None
+    strm_config = load_strm_sync_config()
+    api_key = str(
+        strm_config.get("tmdb_api_key") or os.environ.get("TMDB_API_KEY") or ""
+    ).strip()
+    if not api_key:
+        return None
+    return TmdbClient(
+        api_key,
+        language=str(strm_config.get("tmdb_language") or "it-IT"),
+        rate_limit=int(strm_config.get("tmdb_rate_limit") or 40),
+    )
+
+
+def series_production_finished(paths: list[str] | None = None, *, tmdb_id: int | None = None) -> bool:
+    """True only when TMDB confirms the show has Ended/Canceled.
+
+    If TMDB id/status is unknown, returns False (do not offer deletion yet).
+    """
+    tid = tmdb_id
+    if tid is None:
+        for path in paths or []:
+            tid = _folder_tmdb_id(os.path.basename(os.path.realpath(path)))
+            if tid:
+                break
+    if not tid:
+        return False
+    client = _tmdb_client_for_status()
+    if client is None:
+        return False
+    try:
+        ended = client.is_tv_series_ended(int(tid))
+        client.save_cache()
+    except Exception:
+        return False
+    return bool(ended)
+
+
+def prune_incomplete_deletion_prompts() -> int:
+    """Drop pending deletion prompts for shows that are still airing / unknown on TMDB."""
+    data = load_deletion_prompts()
+    pending = data.get("pending", [])
+    kept: list = []
+    removed = 0
+    for item in pending:
+        if not isinstance(item, dict):
+            continue
+        paths = item.get("paths") or []
+        if series_production_finished(paths):
+            kept.append(item)
+        else:
+            removed += 1
+    if removed:
+        data["pending"] = kept
+        save_deletion_prompts(data)
+    return removed
+
+
+def _prompt_matches_series_id(item: dict, series_id: str) -> bool:
+    if item.get("series_id") == series_id:
+        return True
+    return series_id in {str(x) for x in (item.get("alternate_series_ids") or [])}
+
+
 def add_deletion_prompt(series_id: str, series_name: str, paths: list[str]) -> bool:
     if not paths:
         return False
@@ -154,8 +264,17 @@ def add_deletion_prompt(series_id: str, series_name: str, paths: list[str]) -> b
     dismissed = set(data.get("dismissed", []))
     if series_id in dismissed:
         return False
+    new_paths = _prompt_path_keys(paths)
     for item in data.get("pending", []):
         if item.get("series_id") == series_id:
+            return False
+        if new_paths and _prompt_path_keys(item.get("paths")) & new_paths:
+            # Same folder already queued from the other media server — remember this id.
+            alt = list(item.get("alternate_series_ids") or [])
+            if series_id and series_id not in alt and series_id != item.get("series_id"):
+                alt.append(series_id)
+                item["alternate_series_ids"] = alt
+                save_deletion_prompts(data)
             return False
     data["pending"].append(
         {
@@ -171,18 +290,55 @@ def add_deletion_prompt(series_id: str, series_name: str, paths: list[str]) -> b
 
 def dismiss_deletion_prompt(series_id: str) -> None:
     data = load_deletion_prompts()
+    pending = data.get("pending", [])
+    match = next((p for p in pending if _prompt_matches_series_id(p, series_id)), None)
     dismissed = set(data.get("dismissed", []))
-    dismissed.add(series_id)
+    ids_to_dismiss = {series_id}
+    if match:
+        ids_to_dismiss.add(str(match.get("series_id") or ""))
+        ids_to_dismiss.update(str(x) for x in (match.get("alternate_series_ids") or []))
+        match_paths = _prompt_path_keys(match.get("paths"))
+        for item in pending:
+            if item is match:
+                continue
+            if match_paths and _prompt_path_keys(item.get("paths")) & match_paths:
+                ids_to_dismiss.add(str(item.get("series_id") or ""))
+                ids_to_dismiss.update(str(x) for x in (item.get("alternate_series_ids") or []))
+    dismissed.update(x for x in ids_to_dismiss if x)
     data["dismissed"] = sorted(dismissed)
-    data["pending"] = [p for p in data.get("pending", []) if p.get("series_id") != series_id]
+    drop_ids = set(ids_to_dismiss)
+    data["pending"] = [
+        p
+        for p in pending
+        if str(p.get("series_id") or "") not in drop_ids
+        and not any(str(x) in drop_ids for x in (p.get("alternate_series_ids") or []))
+        and not (
+            match
+            and _prompt_path_keys(match.get("paths"))
+            and _prompt_path_keys(p.get("paths")) & _prompt_path_keys(match.get("paths"))
+        )
+    ]
     save_deletion_prompts(data)
 
 
 def remove_deletion_prompt(series_id: str) -> dict | None:
     data = load_deletion_prompts()
     pending = data.get("pending", [])
-    match = next((p for p in pending if p.get("series_id") == series_id), None)
-    data["pending"] = [p for p in pending if p.get("series_id") != series_id]
+    match = next((p for p in pending if _prompt_matches_series_id(p, series_id)), None)
+    if not match:
+        save_deletion_prompts(data)
+        return None
+    match_paths = _prompt_path_keys(match.get("paths"))
+    data["pending"] = [
+        p
+        for p in pending
+        if p is not match
+        and not (
+            match_paths
+            and _prompt_path_keys(p.get("paths")) & match_paths
+        )
+        and not _prompt_matches_series_id(p, series_id)
+    ]
     save_deletion_prompts(data)
     return match
 
@@ -368,7 +524,7 @@ def restore_strm_for_episodes(
             continue
 
         ext = str(xtream_ep.get("container_extension") or "mp4")
-        url = build_episode_stream_url(host, user, password, xtream_ep["id"], ext)
+        remote_url = build_episode_stream_url(host, user, password, xtream_ep["id"], ext)
         strm_path = _resolve_restore_strm_path(
             series_name=series_name,
             series_folder_hint=series_folder_hint,
@@ -377,6 +533,25 @@ def restore_strm_for_episodes(
             series_output=series_output,
             tmdb_match=tmdb_match,
         )
+        try:
+            from stream_proxy import resolve_episode_play_url
+
+            series_folder = (
+                series_folder_hint
+                or resolve_series_folder_name(series_name, strm_path)
+                or series_name
+            )
+            url = resolve_episode_play_url(
+                series_folder=series_folder,
+                season=season,
+                episode=episode,
+                remote_url=remote_url,
+                strm_path=strm_path,
+                ext=ext,
+                config=load_auto_download_config(),
+            )
+        except ImportError:
+            url = remote_url
         try:
             prepare_output_dir(os.path.dirname(strm_path))
             existed = os.path.isfile(strm_path)
@@ -480,6 +655,11 @@ def scan_completed_series_prompts(media, user_id: str) -> int:
     data = load_deletion_prompts()
     dismissed = set(data.get("dismissed", []))
     pending_ids = {p.get("series_id") for p in data.get("pending", [])}
+    for p in data.get("pending", []):
+        pending_ids.update(str(x) for x in (p.get("alternate_series_ids") or []))
+    pending_paths = set()
+    for p in data.get("pending", []):
+        pending_paths |= _prompt_path_keys(p.get("paths"))
     seen_folders: set[str] = set()
     added = 0
 
@@ -492,6 +672,8 @@ def scan_completed_series_prompts(media, user_id: str) -> int:
             if real_folder in seen_folders or not folder_has_video_files(folder):
                 continue
             seen_folders.add(real_folder)
+            if real_folder in pending_paths:
+                continue
 
             search_term = folder_name.split(" (")[0].strip() or folder_name
             candidates = media.search_series(user_id, search_term)
@@ -509,8 +691,13 @@ def scan_completed_series_prompts(media, user_id: str) -> int:
 
             series_name = str(match.get("Name") or folder_name).strip()
             paths = find_series_download_paths(series_name)
+            if not paths:
+                paths = [folder]
+            if not series_production_finished(paths, tmdb_id=_folder_tmdb_id(folder_name)):
+                continue
             if add_deletion_prompt(series_id, series_name, paths):
                 added += 1
                 pending_ids.add(series_id)
+                pending_paths |= _prompt_path_keys(paths)
 
     return added

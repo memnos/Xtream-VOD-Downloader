@@ -18,6 +18,7 @@ from urllib.parse import quote, urlparse
 import requests
 
 from core import (
+    DATA_DIR,
     build_episode_strm_path,
     build_episode_strm_path_tmdb,
     build_movie_strm_path,
@@ -35,18 +36,24 @@ from core import (
     load_strm_sync_config,
     load_strm_sync_status,
     local_download_exists_for_strm,
+    movie_folder_from_strm_path,
     normalize_episodes_map,
     probe_stream_media_info,
     read_strm_url,
     request_xtream_api,
     save_strm_sync_status,
+    series_folder_from_strm_path,
     title_matches_terms,
     write_strm,
 )
+from stream_proxy import resolve_episode_play_url, resolve_movie_play_url
 from tmdb import TmdbClient, clean_title
 
 _sync_lock = threading.Lock()
 _sync_thread: threading.Thread | None = None
+SYNC_PID_FILE = os.environ.get(
+    "STRM_SYNC_PID_FILE", os.path.join(DATA_DIR, "strm_sync.pid")
+)
 M3U_ATTR_RE = re.compile(r'([\w-]+)="([^"]*)"')
 M3U_SERIES_URL_RE = re.compile(
     r"/series/[^/]+/[^/]+/(\d+)\.([A-Za-z0-9]+)(?:[?#].*)?$",
@@ -377,7 +384,20 @@ def _sync_movie_item(
         return "unmatched", None
 
     ext = str(item.get("container_extension") or "mp4")
-    url = build_movie_stream_url(host, user, password, stream_id, ext)
+    remote_url = build_movie_stream_url(host, user, password, stream_id, ext)
+    auto_cfg = load_auto_download_config()
+    folder_name = (
+        movie_folder_from_strm_path(strm_path)
+        or os.path.basename(os.path.dirname(strm_path))
+        or name
+    )
+    url = resolve_movie_play_url(
+        folder_name=folder_name,
+        remote_url=remote_url,
+        strm_path=strm_path,
+        ext=ext,
+        config=auto_cfg,
+    )
 
     local_action = _skip_strm_when_local_exists(strm_path)
     if local_action:
@@ -390,7 +410,7 @@ def _sync_movie_item(
         if not update_existing:
             return "skipped", strm_path
         if probe_on_write:
-            media = probe_stream_media_info(url, timeout=45)
+            media = probe_stream_media_info(remote_url, timeout=45)
             if media is None or float(media.get("duration") or 0) <= 0:
                 return "probe_failed", strm_path
         if write_strm(strm_path, url):
@@ -399,7 +419,7 @@ def _sync_movie_item(
 
     # Create: always verify new / replacement streams before writing.
     if probe_on_write:
-        media = probe_stream_media_info(url, timeout=45)
+        media = probe_stream_media_info(remote_url, timeout=45)
         if media is None or float(media.get("duration") or 0) <= 0:
             return "probe_failed", strm_path
 
@@ -666,7 +686,7 @@ def _sync_series_item(
             if episode_num < 0 or ep_id is None:
                 continue
             ext = str(ep.get("container_extension") or "mp4")
-            url = build_episode_stream_url(host, user, password, ep_id, ext)
+            remote_url = build_episode_stream_url(host, user, password, ep_id, ext)
             strm_path = _series_episode_path(
                 series_name, match, use_tmdb, season, episode_num, series_output
             )
@@ -683,6 +703,21 @@ def _sync_series_item(
             if local_action:
                 counts[local_action] += 1
                 continue
+            series_folder = (
+                series_folder_from_strm_path(strm_path)
+                or os.path.basename(os.path.dirname(os.path.dirname(strm_path)))
+                or series_name
+            )
+            auto_cfg = load_auto_download_config()
+            url = resolve_episode_play_url(
+                series_folder=series_folder,
+                season=season,
+                episode=episode_num,
+                remote_url=remote_url,
+                strm_path=strm_path,
+                ext=ext,
+                config=auto_cfg,
+            )
             action = "skipped"
             if os.path.isfile(strm_path):
                 existing_url = read_strm_url(strm_path)
@@ -772,14 +807,30 @@ def _sync_series_m3u_item(
         if local_action:
             counts[local_action] += 1
             continue
+        series_folder = (
+            series_folder_from_strm_path(strm_path)
+            or os.path.basename(os.path.dirname(os.path.dirname(strm_path)))
+            or series_name
+        )
+        ext = str(ep.get("ext") or _episode_ext_from_url(url) or "mp4")
+        auto_cfg = load_auto_download_config()
+        play_url = resolve_episode_play_url(
+            series_folder=series_folder,
+            season=season,
+            episode=episode_num,
+            remote_url=url,
+            strm_path=strm_path,
+            ext=ext,
+            config=auto_cfg,
+        )
         action = "skipped"
         if os.path.isfile(strm_path):
             existing_url = read_strm_url(strm_path)
-            if existing_url == url:
+            if existing_url == play_url:
                 action = "skipped"
-            elif update_existing and write_strm(strm_path, url):
+            elif update_existing and write_strm(strm_path, play_url):
                 action = "updated"
-        elif write_strm(strm_path, url):
+        elif write_strm(strm_path, play_url):
             action = "created"
         counts[action] += 1
         if action == "created":
@@ -1011,6 +1062,7 @@ def run_strm_sync(host: str, user: str, password: str, config: dict | None = Non
     config = config or load_strm_sync_config()
     status = default_strm_sync_status()
     status["running"] = True
+    _write_sync_pid()
     _save_status(status)
 
     tmdb_client = _build_tmdb_client(config)
@@ -1428,6 +1480,28 @@ def run_strm_sync(host: str, user: str, password: str, config: dict | None = Non
         except Exception as exc:
             _append_log(status, f"Season analysis not started: {exc}")
 
+        try:
+            from continue_download import scan_and_enqueue_continue_downloads
+            from core import load_auto_download_config as _load_auto
+
+            auto_cfg = _load_auto()
+            cont = scan_and_enqueue_continue_downloads(
+                strm_root=str(config.get("series_output") or "").strip() or None,
+                config=auto_cfg,
+            )
+            if cont.get("skipped"):
+                _append_log(status, "Continue-download skipped (auto-download off)")
+            elif cont.get("episodes"):
+                _append_log(
+                    status,
+                    f"Continue-download: {cont['episodes']} new strm episode(s) "
+                    f"for incomplete series ({cont['queued']} queued for watcher)",
+                )
+            else:
+                _append_log(status, "Continue-download: no newer strm episodes for local series")
+        except Exception as exc:
+            _append_log(status, f"Continue-download not started: {exc}")
+
         if tmdb_client is not None:
             status["tmdb_lookups"] = tmdb_client.lookups
             status["tmdb_cache_hits"] = tmdb_client.cache_hits
@@ -1451,15 +1525,59 @@ def run_strm_sync(host: str, user: str, password: str, config: dict | None = Non
                 tmdb_client.save_cache()
             except Exception:
                 pass
+        try:
+            from stream_proxy import flush_proxy_registry
+
+            flush_proxy_registry()
+        except Exception:
+            pass
         status["running"] = False
+        _clear_sync_pid()
         _save_status(status)
 
 
+def _write_sync_pid() -> None:
+    try:
+        os.makedirs(os.path.dirname(SYNC_PID_FILE) or ".", exist_ok=True)
+        with open(SYNC_PID_FILE, "w", encoding="utf-8") as handle:
+            handle.write(str(os.getpid()))
+    except OSError:
+        pass
+
+
+def _clear_sync_pid() -> None:
+    try:
+        os.remove(SYNC_PID_FILE)
+    except OSError:
+        pass
+
+
+def _sync_pid_alive() -> bool:
+    """True if strm_sync.pid points at a living process (any worker owning the sync)."""
+    try:
+        with open(SYNC_PID_FILE, encoding="utf-8") as handle:
+            pid = int((handle.read() or "").strip())
+    except (OSError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but we can't signal it — treat as alive.
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def clear_stale_sync_running(*, reason: str = "process restarted") -> bool:
-    """If status says running but no live thread, clear the flag. Returns True if cleared."""
+    """If status says running but no live owner, clear the flag. Returns True if cleared."""
     with _sync_lock:
         alive = _sync_thread is not None and _sync_thread.is_alive()
-    if alive:
+    if alive or _sync_pid_alive():
         return False
     status = load_strm_sync_status()
     if not status.get("running"):
@@ -1472,6 +1590,7 @@ def clear_stale_sync_running(*, reason: str = "process restarted") -> bool:
         timestamp = datetime.now().strftime("%H:%M:%S")
         log.append(f"[{timestamp}] Cleared stale running=True ({reason})")
         status["log"] = log[-80:]
+    _clear_sync_pid()
     _save_status(status)
     return True
 
@@ -1480,6 +1599,8 @@ def is_strm_sync_running() -> bool:
     with _sync_lock:
         if _sync_thread is not None and _sync_thread.is_alive():
             return True
+    if _sync_pid_alive():
+        return True
     # Orphaned flag after container/process restart — clear so schedule can resume.
     clear_stale_sync_running()
     return False
@@ -1491,7 +1612,7 @@ def start_strm_sync(host: str, user: str, password: str, config: dict | None = N
     with _sync_lock:
         if _sync_thread is not None and _sync_thread.is_alive():
             return False
-        if load_strm_sync_status().get("running"):
+        if _sync_pid_alive() or load_strm_sync_status().get("running"):
             return False
 
         def _worker() -> None:

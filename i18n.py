@@ -106,7 +106,78 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         ),
         "enable_auto": "Enable automatic download",
         "prompt_delete_completed": "Ask to delete completed series",
-        "prompt_delete_help": "When all episodes are marked watched, offer to delete downloaded files.",
+        "prompt_delete_help": "Only when TMDB marks the show as ended/canceled and every episode is watched.",
+        "continue_download_incomplete": "Keep downloading new episodes for incomplete series",
+        "continue_download_incomplete_help": (
+            "After strm sync, auto-download newer episodes for series that already "
+            "have local downloads (replace .strm)."
+        ),
+        "prefetch_playing_strm": "Prefetch the .strm being watched",
+        "prefetch_playing_strm_help": (
+            "When you play an Xtream .strm, download that title with priority. "
+            "The watcher measures download speed vs bitrate and either switches to the local "
+            "partial file (~120s buffer) or keeps the .strm if download is too slow."
+        ),
+        "prefetch_auto_switch": "Auto-switch TV to local file when buffer is ready",
+        "prefetch_auto_switch_help": (
+            "If enabled, Emby/Jellyfin are asked to PlayNow the local file at the current position. "
+            "If the client ignores the command, a TV message still asks you to restart playback."
+        ),
+        "prefetch_buffer_seconds": "Target buffer (seconds of media)",
+        "prefetch_buffer_seconds_help": (
+            "Switch only after roughly this many seconds of video are already on disk."
+        ),
+        "prefetch_buffer_mb": "Minimum buffer (MB)",
+        "prefetch_buffer_mb_help": "Also require at least this many megabytes before switching.",
+        "prefetch_max_wait_seconds": "Max wait before decide (seconds)",
+        "prefetch_max_wait_seconds_help": (
+            "If the target buffer is not reached within this time, decide stay-on-strm vs switch."
+        ),
+        "prefetch_min_speed_ratio": "Min download/bitrate ratio",
+        "prefetch_min_speed_ratio_help": (
+            "Download must be at least this times faster than the video bitrate to switch to local."
+        ),
+        "cleanup_watched_movie_downloads": "Delete local movie after watched + restore .strm",
+        "cleanup_watched_movie_downloads_help": (
+            "For movies only: when playback ends and Emby/Jellyfin considers the title watched "
+            "(or progress ≥ threshold), delete the [LOCAL] file and recreate the .strm. "
+            "Stopping mid-movie does not trigger cleanup."
+        ),
+        "watched_movie_threshold": "Watched threshold (0.5–0.99)",
+        "watched_movie_threshold_help": (
+            "Fallback if Played is not set yet: treat as watched when playhead reaches this fraction "
+            "of runtime (default 0.90)."
+        ),
+        "stream_proxy_section": "Progressive play proxy (movies & series)",
+        "stream_proxy_enabled": "Serve movie/episode .strm via local progressive proxy",
+        "stream_proxy_enabled_help": (
+            "Movie and episode .strm files point at this server instead of Xtream. On Play the "
+            "proxy relays (or optionally downloads to [LOCAL]) so the TV sees a LAN stream. "
+            "Recommended for GuamaFlix / clients without PlayNow."
+        ),
+        "stream_proxy_host": "Playback proxy host",
+        "stream_proxy_host_help": (
+            "Hostname or IP the Apple TV can reach (LAN e.g. 192.168.1.153, or Tailscale name e.g. media). "
+            "Must resolve from the TV; with WSL2 also forward port 8510 via Windows portproxy."
+        ),
+        "stream_proxy_port": "Playback proxy port",
+        "stream_proxy_port_help": "HTTP port of the progressive proxy (default 8510).",
+        "stream_proxy_download": "Also download [LOCAL] while playing via proxy",
+        "stream_proxy_download_help": (
+            "Off (recommended): proxy only relays Xtream to the TV — no local file, faster resume, "
+            "no incomplete [LOCAL] in the library. On: also save a [LOCAL] copy while you watch."
+        ),
+        "stream_proxy_rewrite_strms": "Rewrite existing movie/episode .strm to proxy on save",
+        "stream_proxy_rewrite_strms_help": (
+            "When saving with the proxy enabled, rewrite movie and episode .strm files under the "
+            "strm library to the proxy URL (remote Xtream URL stays in the registry)."
+        ),
+        "stream_proxy_rewrite_result": (
+            "Rewrote {updated} movie .strm (scanned {scanned}, skipped {skipped})."
+        ),
+        "stream_proxy_rewrite_episodes_result": (
+            "Rewrote {updated} episode .strm (scanned {scanned}, skipped {skipped})."
+        ),
         "emby_section": "Emby",
         "jellyfin_section": "Jellyfin",
         "enable_emby": "Monitor Emby",
@@ -137,6 +208,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "server_test_fail": "**{server}** — {detail}",
         "auto_settings_saved": "Settings saved. The watcher will pick them up within 15 seconds.",
         "sidebar_login": "🔑 Xtream Login",
+        "sidebar_options": "Options",
+        "nav_section": "Navigation",
+        "nav_section_label": "Section",
+        "nav_download": "Download",
+        "nav_library": "Library",
+        "nav_assist": "Assist",
+        "include_4k_strm_help": "Allow 4K titles when generating the .strm library (independent from the global download 4K setting).",
         "build": "Build {version}",
         "host": "Host (e.g. http://provider.com:80)",
         "username": "Username",
@@ -150,6 +228,60 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "mode_strm": ".strm library",
         "mode_duration": "Duration audit",
         "mode_auto": "Automatic download",
+        "mode_assist": "Playback assist",
+        "assist_title": "Playback assist (intro skip + subtitles)",
+        "assist_help": (
+            "When you start watching a series episode on Emby/Jellyfin, the watcher can "
+            "create intro skip segments and download Italian subtitles beside the `.strm`. "
+            "Intro analysis may temporarily download a hidden sample (strm/proxy playback stays). "
+            "Uses the same Emby/Jellyfin connection as Automatic download."
+        ),
+        "auto_intro_skip_enabled": "Auto intro skip for series you start watching",
+        "auto_intro_skip_help": (
+            "On episode play, ensure Intro MediaSegments for that season (from the episode onward). "
+            "If needed, downloads a hidden sample, analyzes it, writes the segment to Jellyfin, "
+            "and keeps playback on .strm via proxy."
+        ),
+        "auto_intro_skip_download": "Download hidden media when no local file exists",
+        "auto_intro_skip_download_help": (
+            "Prefers analyzing the remote stream directly (no disk). "
+            "If that fails, downloads a hidden sample. "
+            "With «keep until watched», downloads a full hidden .proxysource instead. "
+            "Never replaces the .strm in Jellyfin."
+        ),
+        "auto_intro_skip_keep_until_watched": "Keep hidden locals until the series is fully watched",
+        "auto_intro_skip_keep_until_watched_help": (
+            "Off (default): delete the hidden file as soon as the Intro segment is saved. "
+            "On: keep .proxysource files for proxy/local use, then delete when every episode is played."
+        ),
+        "auto_subs_enabled": "Auto-download Italian subtitles",
+        "auto_subs_help": (
+            "On episode play, download subtitles for that episode and the rest of the season. "
+            "Writes `.ita.forced.srt` or `.ita.srt` next to the `.strm` (strm branch)."
+        ),
+        "auto_subs_prefer_forced": "Prefer forced Italian, else full Italian",
+        "auto_subs_prefer_forced_help": (
+            "OpenSubtitles foreign-parts/forced first. Jellyfin remote search rarely marks "
+            "Forced correctly, so OpenSubtitles credentials are recommended."
+        ),
+        "auto_subs_language": "Subtitle language code",
+        "auto_subs_language_help": "OpenSubtitles language (default: it).",
+        "opensubtitles_section": "OpenSubtitles.com",
+        "opensubtitles_help": (
+            "Optional if Jellyfin Open Subtitles plugin credentials are readable on this host. "
+            "Forced Italian usually requires the OpenSubtitles.com API (not JF search alone)."
+        ),
+        "opensubtitles_username": "OpenSubtitles username",
+        "opensubtitles_password": "OpenSubtitles password",
+        "opensubtitles_api_key": "OpenSubtitles API key",
+        "opensubtitles_api_key_help": "Defaults to the Jellyfin plugin key if left empty.",
+        "save_assist_settings": "Save assist settings",
+        "assist_settings_saved": "Assist settings saved.",
+        "assist_need_media_server": "Enable Jellyfin (or Emby) under Automatic download first.",
+        "assist_status_caption": "Watcher / assist status",
+        "assist_status_line": "Running: {running} · Intro: {intro} · Subs: {subs} · Playing: {playing}",
+        "yes": "yes",
+        "no": "no",
         "enter_creds": "Enter Xtream credentials in the sidebar to get started.",
         "content_type": "What do you want to download?",
         "content_movies": "Movies",
@@ -636,7 +768,76 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         ),
         "enable_auto": "Abilita download automatico",
         "prompt_delete_completed": "Chiedi eliminazione serie completata",
-        "prompt_delete_help": "Quando tutti gli episodi risultano visti, propone di cancellare i file scaricati.",
+        "prompt_delete_help": "Solo se TMDB segna la serie come terminata/cancellata e tutti gli episodi sono visti.",
+        "continue_download_incomplete": "Continua a scaricare episodi nuovi per serie incomplete",
+        "continue_download_incomplete_help": (
+            "Dopo il sync degli .strm, scarica automaticamente gli episodi più nuovi "
+            "per le serie che hanno già download locali (sostituisce lo .strm)."
+        ),
+        "prefetch_playing_strm": "Prefetch dello .strm in riproduzione",
+        "prefetch_playing_strm_help": (
+            "Quando riproduci uno .strm Xtream, scarica quel titolo in priorità. "
+            "Il watcher confronta velocità di download e bitrate: se conviene passa al file locale "
+            "(buffer ~120s), altrimenti resta sullo .strm."
+        ),
+        "prefetch_auto_switch": "Passa automaticamente al file locale quando il buffer è pronto",
+        "prefetch_auto_switch_help": (
+            "Se attivo, chiede a Emby/Jellyfin PlayNow sul file locale dalla posizione corrente. "
+            "Se il client ignora il comando, resta la notifica in TV per riavviare a mano."
+        ),
+        "prefetch_buffer_seconds": "Buffer obiettivo (secondi di film)",
+        "prefetch_buffer_seconds_help": (
+            "Passa al locale solo quando circa questi secondi di video sono già su disco."
+        ),
+        "prefetch_buffer_mb": "Buffer minimo (MB)",
+        "prefetch_buffer_mb_help": "Richiede anche almeno questi megabyte prima dello switch.",
+        "prefetch_max_wait_seconds": "Attesa massima prima di decidere (secondi)",
+        "prefetch_max_wait_seconds_help": (
+            "Se il buffer non è pronto entro questo tempo, decide se restare sullo .strm o switchare."
+        ),
+        "prefetch_min_speed_ratio": "Rapporto minimo download/bitrate",
+        "prefetch_min_speed_ratio_help": (
+            "Il download deve essere almeno così più veloce del bitrate del video per passare al locale."
+        ),
+        "cleanup_watched_movie_downloads": "Dopo film visto: cancella locale e ripristina .strm",
+        "cleanup_watched_movie_downloads_help": (
+            "Solo film: a fine visione, se Emby/Jellyfin lo considera visto "
+            "(o progresso ≥ soglia), elimina il file [LOCAL] e ricrea lo .strm. "
+            "Lo stop a metà film non cancella nulla."
+        ),
+        "watched_movie_threshold": "Soglia 'visto' (0.5–0.99)",
+        "watched_movie_threshold_help": (
+            "Se Played non è ancora impostato: considerato visto quando la posizione raggiunge "
+            "questa frazione della durata (default 0.90)."
+        ),
+        "stream_proxy_section": "Proxy riproduzione progressiva (film e serie)",
+        "stream_proxy_enabled": "Servi gli .strm film/episodi tramite proxy locale progressivo",
+        "stream_proxy_enabled_help": (
+            "Gli .strm film ed episodio puntano a questo server invece che a Xtream. Al Play il "
+            "proxy inoltra (o opzionalmente scarica su [LOCAL]) così la TV vede uno stream LAN. "
+            "Consigliato per GuamaFlix / client senza PlayNow."
+        ),
+        "stream_proxy_host": "Host proxy riproduzione",
+        "stream_proxy_host_help": (
+            "Hostname o IP raggiungibile dall'Apple TV (LAN es. 192.168.1.153, o nome Tailscale es. media). "
+            "Deve risolvere dalla TV; con WSL2 inoltra anche la porta 8510 via portproxy Windows."
+        ),
+        "stream_proxy_port": "Porta proxy riproduzione",
+        "stream_proxy_port_help": "Porta HTTP del proxy progressivo (default 8510).",
+        "stream_proxy_download": "Scarica anche [LOCAL] mentre riproduci via proxy",
+        "stream_proxy_download_help": (
+            "Spento (consigliato): il proxy solo inoltra Xtream alla TV — niente file locale, "
+            "resume più rapido, niente [LOCAL] incompleti in libreria. Acceso: salva anche una copia [LOCAL] mentre guardi."
+        ),
+        "stream_proxy_rewrite_strms": "Riscrivi gli .strm film/episodi esistenti verso il proxy al salvataggio",
+        "stream_proxy_rewrite_strms_help": (
+            "Salvando con proxy attivo, riscrive gli .strm film ed episodio nella libreria strm "
+            "verso l'URL del proxy (l'URL Xtream resta nel registry)."
+        ),
+        "stream_proxy_rewrite_result": "Riscritti {updated} .strm film (scansionati {scanned}, saltati {skipped}).",
+        "stream_proxy_rewrite_episodes_result": (
+            "Riscritti {updated} .strm episodio (scansionati {scanned}, saltati {skipped})."
+        ),
         "emby_section": "Emby",
         "jellyfin_section": "Jellyfin",
         "enable_emby": "Monitora Emby",
@@ -667,6 +868,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "server_test_fail": "**{server}** — {detail}",
         "auto_settings_saved": "Impostazioni salvate. Il watcher leggerà le nuove impostazioni entro 15 secondi.",
         "sidebar_login": "🔑 Xtream Login",
+        "sidebar_options": "Opzioni",
+        "nav_section": "Navigazione",
+        "nav_section_label": "Sezione",
+        "nav_download": "Download",
+        "nav_library": "Libreria",
+        "nav_assist": "Assist",
+        "include_4k_strm_help": "Consenti titoli 4K quando generi la libreria .strm (indipendente dall'impostazione 4K globale per i download).",
         "build": "Build {version}",
         "host": "Host (es. http://provider.com:80)",
         "username": "Username",
@@ -680,6 +888,60 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "mode_strm": "Libreria .strm",
         "mode_duration": "Audit durata",
         "mode_auto": "Download automatico",
+        "mode_assist": "Assist riproduzione",
+        "assist_title": "Assist riproduzione (intro skip + sottotitoli)",
+        "assist_help": (
+            "Quando inizi a guardare un episodio su Emby/Jellyfin, il watcher può "
+            "creare i segmenti intro skip e scaricare i sottotitoli italiani accanto allo `.strm`. "
+            "Per l'intro può scaricare temporaneamente un campione nascosto (la visione resta su strm/proxy). "
+            "Usa la stessa connessione Emby/Jellyfin del Download automatico."
+        ),
+        "auto_intro_skip_enabled": "Intro skip automatico per le serie che inizi a guardare",
+        "auto_intro_skip_help": (
+            "Alla riproduzione di un episodio, crea i MediaSegments Intro per la stagione "
+            "(da quell'episodio in poi). Se serve, scarica un campione nascosto, analizza, "
+            "scrive il segmento su Jellyfin e lascia la visione sugli .strm via proxy."
+        ),
+        "auto_intro_skip_download": "Scarica media nascosti se non c'è file locale",
+        "auto_intro_skip_download_help": (
+            "Di preferenza analizza lo stream remoto (senza disco). "
+            "Se fallisce, scarica un campione nascosto. "
+            "Con «tieni fino a serie vista» scarica un .proxysource completo. "
+            "Non sostituisce lo .strm in Jellyfin."
+        ),
+        "auto_intro_skip_keep_until_watched": "Tieni i locali nascosti finché non hai visto tutta la serie",
+        "auto_intro_skip_keep_until_watched_help": (
+            "Spento (default): cancella il file nascosto appena l'Intro è salvata. "
+            "Acceso: tiene i .proxysource, poi li cancella quando tutti gli episodi risultano visti."
+        ),
+        "auto_subs_enabled": "Download automatico sottotitoli italiani",
+        "auto_subs_help": (
+            "Alla riproduzione, scarica i sottotitoli per quell'episodio e il resto della stagione. "
+            "Scrive `.ita.forced.srt` o `.ita.srt` accanto allo `.strm` (branch strm)."
+        ),
+        "auto_subs_prefer_forced": "Preferisci forced italiani, altrimenti italiani completi",
+        "auto_subs_prefer_forced_help": (
+            "Prima OpenSubtitles foreign-parts/forced. La ricerca remota di Jellyfin raramente "
+            "segna Forced correttamente: meglio le credenziali OpenSubtitles."
+        ),
+        "auto_subs_language": "Codice lingua sottotitoli",
+        "auto_subs_language_help": "Lingua OpenSubtitles (default: it).",
+        "opensubtitles_section": "OpenSubtitles.com",
+        "opensubtitles_help": (
+            "Opzionale se le credenziali del plugin Open Subtitles di Jellyfin sono leggibili "
+            "su questo host. I forced italiani di solito richiedono l'API OpenSubtitles.com."
+        ),
+        "opensubtitles_username": "Username OpenSubtitles",
+        "opensubtitles_password": "Password OpenSubtitles",
+        "opensubtitles_api_key": "API key OpenSubtitles",
+        "opensubtitles_api_key_help": "Se vuoto, usa la chiave del plugin Jellyfin.",
+        "save_assist_settings": "Salva impostazioni assist",
+        "assist_settings_saved": "Impostazioni assist salvate.",
+        "assist_need_media_server": "Abilita prima Jellyfin (o Emby) nel menu Download automatico.",
+        "assist_status_caption": "Stato watcher / assist",
+        "assist_status_line": "Attivo: {running} · Intro: {intro} · Subs: {subs} · In play: {playing}",
+        "yes": "sì",
+        "no": "no",
         "enter_creds": "Inserisci le credenziali Xtream nella barra laterale per iniziare.",
         "content_type": "Cosa vuoi scaricare?",
         "content_movies": "Film",

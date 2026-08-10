@@ -425,6 +425,51 @@ class TmdbClient:
         )
         return runtime
 
+    # TMDB TV statuses that mean no further episodes are expected.
+    TV_ENDED_STATUSES = frozenset({"Ended", "Canceled", "Cancelled"})
+
+    def get_tv_status(self, tmdb_id: int) -> str | None:
+        """Return TMDB TV status string (e.g. Ended, Returning Series), or None."""
+        try:
+            tid = int(tmdb_id)
+        except (TypeError, ValueError):
+            return None
+        if tid <= 0:
+            return None
+        key = f"tv_status:{tid}"
+        cached = self._cached(key)
+        if cached is not None:
+            if not cached.get("matched"):
+                return None
+            status = str(cached.get("status") or "").strip()
+            return status or None
+
+        self.lookups += 1
+        payload = self._get(f"/tv/{tid}", {})
+        if payload is None:
+            return None
+        status = str(payload.get("status") or "").strip()
+        if not status:
+            self._store_negative(key)
+            return None
+        self._store(
+            key,
+            {
+                "matched": True,
+                "tmdb_id": tid,
+                "status": status,
+                "name": payload.get("name") or payload.get("original_name") or "",
+            },
+        )
+        return status
+
+    def is_tv_series_ended(self, tmdb_id: int) -> bool | None:
+        """True if TMDB marks the show Ended/Canceled; False if still airing; None if unknown."""
+        status = self.get_tv_status(tmdb_id)
+        if status is None:
+            return None
+        return status in self.TV_ENDED_STATUSES
+
     def is_valid_tv_episode(
         self,
         tmdb_id: int | None,

@@ -14,6 +14,8 @@ services:
       - ${STRM_SERIES_PATH:-./strm/series}:/strm/series
       # Cartella di test per generare/validare prima di promuovere in produzione
       - ${STRM_TEST_PATH:-./strm-test}:/strm-test
+      # Credenziali OpenSubtitles del plugin Jellyfin (forced IT / fallback)
+      - ${OPENSUBTITLES_JF_CONFIG:-/var/lib/jellyfin/config/data/plugins/configurations/Jellyfin.Plugin.OpenSubtitles.xml}:/config/Jellyfin.Plugin.OpenSubtitles.xml:ro
     environment:
       - TZ=${TZ:-UTC}
       - PUID=${PUID:-1000}
@@ -26,4 +28,7 @@ services:
       - TMDB_API_KEY=${TMDB_API_KEY:-}
       - TMDB_LANGUAGE=${TMDB_LANGUAGE:-it-IT}
       - STREAMLIT_SERVER_FILE_WATCHER_TYPE=none
+      - STREAM_PROXY_HOST=${STREAM_PROXY_HOST:-}
+      - OPENSUBTITLES_JF_CONFIG=/config/Jellyfin.Plugin.OpenSubtitles.xml
+      - OPENSUBTITLES_API_KEY=${OPENSUBTITLES_API_KEY:-gUCLWGoAg2PmyseoTM0INFFVPcDCeDlT}
     restart: unless-stopped
