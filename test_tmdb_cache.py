@@ -98,6 +98,63 @@ class TmdbEpisodeValidationTest(unittest.TestCase):
             self.assertIsNone(client.is_valid_tv_episode(81292, 1, 11))
         self.assertIsNone(client.is_valid_tv_episode(None, 1, 1))
 
+    def test_stale_season_cache_refreshes_on_new_episode(self):
+        client = TmdbClient(
+            "test-key",
+            negative_ttl_seconds=3600,
+            season_counts_ttl_seconds=3600,
+        )
+        client._store(
+            "tv_seasons:81723",
+            {"matched": True, "tmdb_id": 81723, "seasons": {"1": 8, "3": 8}},
+        )
+        with client._cache_lock:
+            client._cache["tv_seasons:81723"]["cached_at"] = time.time() - 7200
+        payload = {
+            "seasons": [
+                {"season_number": 1, "episode_count": 8},
+                {"season_number": 3, "episode_count": 8},
+                {"season_number": 4, "episode_count": 8},
+            ]
+        }
+        with mock.patch.object(client, "_get", return_value=payload) as get:
+            self.assertTrue(client.is_valid_tv_episode(81723, 4, 1))
+            self.assertEqual(get.call_count, 1)
+            self.assertTrue(client.is_valid_tv_episode(81723, 4, 8))
+            self.assertEqual(get.call_count, 1)
+
+    def test_fresh_season_cache_keeps_phantom_rejected(self):
+        client = TmdbClient(
+            "test-key",
+            negative_ttl_seconds=3600,
+            season_counts_ttl_seconds=3600,
+        )
+        client._store(
+            "tv_seasons:81723",
+            {"matched": True, "tmdb_id": 81723, "seasons": {"1": 8}},
+        )
+        with mock.patch.object(client, "_get") as get:
+            self.assertFalse(client.is_valid_tv_episode(81723, 1, 9))
+            self.assertFalse(client.is_valid_tv_episode(81723, 2, 1))
+            get.assert_not_called()
+
+    def test_stale_season_cache_still_rejects_true_phantom(self):
+        client = TmdbClient(
+            "test-key",
+            negative_ttl_seconds=3600,
+            season_counts_ttl_seconds=3600,
+        )
+        client._store(
+            "tv_seasons:615",
+            {"matched": True, "tmdb_id": 615, "seasons": {"11": 10}},
+        )
+        with client._cache_lock:
+            client._cache["tv_seasons:615"]["cached_at"] = time.time() - 7200
+        payload = {"seasons": [{"season_number": 11, "episode_count": 10}]}
+        with mock.patch.object(client, "_get", return_value=payload) as get:
+            self.assertFalse(client.is_valid_tv_episode(615, 12, 1))
+            self.assertEqual(get.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

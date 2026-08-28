@@ -836,13 +836,21 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.end_headers()
             if head_only:
                 return
-            for chunk in resp.iter_content(chunk_size=256 * 1024):
-                if not chunk:
-                    continue
-                try:
-                    self.wfile.write(chunk)
-                except (BrokenPipeError, ConnectionResetError):
-                    break
+            try:
+                for chunk in resp.iter_content(chunk_size=256 * 1024):
+                    if not chunk:
+                        continue
+                    try:
+                        self.wfile.write(chunk)
+                    except (BrokenPipeError, ConnectionResetError):
+                        break
+            except (
+                requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+            ) as exc:
+                # Provider closed the socket (often a second Xtream connection).
+                print(f"[stream_proxy] upstream closed during passthrough: {exc}", flush=True)
         finally:
             resp.close()
 

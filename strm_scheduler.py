@@ -126,14 +126,18 @@ def tick_strm_scheduler() -> None:
         update_schedule_status(next_run=nxt)
         return
 
+    nxt = compute_next_scheduled_run(config, after=now)
+    finished_at = format_schedule_time(now)
+    # Advance the schedule before starting the worker so run_strm_sync copies
+    # tomorrow's slot instead of clobbering it back to the due time.
+    update_schedule_status(next_run=nxt, last_run=finished_at)
     if start_strm_sync(host, user, password, config):
-        finished_at = format_schedule_time(now)
-        nxt = compute_next_scheduled_run(config, after=now)
-        update_schedule_status(next_run=nxt, last_run=finished_at)
         status = load_strm_sync_status()
         log = status.setdefault("log", [])
         log.append(f"[{now.strftime('%H:%M:%S')}] Scheduled sync started")
         status["log"] = log[-80:]
+        status["schedule_next_run"] = format_schedule_time(nxt)
+        status["schedule_last_run"] = finished_at
         save_strm_sync_status(status)
 
 

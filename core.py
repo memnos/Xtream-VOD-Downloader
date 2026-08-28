@@ -136,6 +136,18 @@ def playback_blocks_xtream_download(item_path: str, xtream_host: str) -> bool:
     return False
 
 
+def xtream_playback_blocks_extra_streams() -> bool:
+    """True while a .strm is playing — extra Xtream connections stall GuamaFlix."""
+    try:
+        status = load_watcher_status()
+    except Exception:
+        return False
+    if not status.get("playback_active"):
+        return False
+    label = str(status.get("current_playing") or "").lower()
+    return "(strm)" in label
+
+
 def sanitize_filename(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', "", name).strip()
 
@@ -1183,6 +1195,13 @@ def find_local_files_for_strm(strm_path: str) -> list[str]:
             match = find_strm_folder_match(DOWNLOAD_MOVIES_PATH, movie_folder)
             if match:
                 search_dirs.append(os.path.join(DOWNLOAD_MOVIES_PATH, match))
+        # Title language can differ (IT strm vs EN Radarr folder); match by tmdbid.
+        tmdb_id = _extract_tmdb_id_from_path(strm_path) or _extract_tmdb_id_from_path(
+            movie_folder
+        )
+        tmdb_match = find_folder_by_tmdb_id(DOWNLOAD_MOVIES_PATH, tmdb_id)
+        if tmdb_match:
+            search_dirs.append(os.path.join(DOWNLOAD_MOVIES_PATH, tmdb_match))
     seen_dirs = set()
     for directory in search_dirs:
         real_dir = os.path.realpath(directory)
@@ -1917,19 +1936,22 @@ _folder_index_lock = threading.Lock()
 
 
 class _FolderIndex:
-    __slots__ = ("mtime", "exact", "loose")
+    __slots__ = ("mtime", "exact", "loose", "by_tmdb")
 
     def __init__(
         self,
         mtime: float,
         exact: dict[str, list[tuple[str, int | None]]],
         loose: dict[str, list[tuple[str, int | None]]],
+        by_tmdb: dict[int, list[str]] | None = None,
     ) -> None:
         self.mtime = mtime
         # normalized_title -> [(folder_name, year)]
         self.exact = exact
         # normalized_title without leading "the" -> [(folder_name, year)]
         self.loose = loose
+        # tmdb_id -> [folder_name, ...]
+        self.by_tmdb = by_tmdb or {}
 
 
 _folder_index: dict[str, _FolderIndex] = {}
@@ -1960,14 +1982,18 @@ def _loose_title_key(normalized: str) -> str:
 def _build_folder_index(root: str, mtime: float) -> _FolderIndex:
     exact: dict[str, list[tuple[str, int | None]]] = {}
     loose: dict[str, list[tuple[str, int | None]]] = {}
+    by_tmdb: dict[int, list[str]] = {}
     try:
         names = os.listdir(root)
     except OSError:
-        return _FolderIndex(mtime, exact, loose)
+        return _FolderIndex(mtime, exact, loose, by_tmdb)
     for name in names:
         folder = os.path.join(root, name)
         if not os.path.isdir(folder):
             continue
+        tmdb_id = _extract_tmdb_id_from_path(name)
+        if tmdb_id is not None:
+            by_tmdb.setdefault(tmdb_id, []).append(name)
         norm = normalize_title(name)
         if not norm:
             continue
@@ -1975,7 +2001,7 @@ def _build_folder_index(root: str, mtime: float) -> _FolderIndex:
         entry = (name, year)
         exact.setdefault(norm, []).append(entry)
         loose.setdefault(_loose_title_key(norm), []).append(entry)
-    return _FolderIndex(mtime, exact, loose)
+    return _FolderIndex(mtime, exact, loose, by_tmdb)
 
 
 def _get_folder_index(root: str) -> _FolderIndex | None:
@@ -2054,6 +2080,26 @@ def find_strm_folder_match(root: str, title: str) -> str | None:
             loose, target_year, target_norm=target, prefer_shortest_exact=False
         )
     return None
+
+
+def find_folder_by_tmdb_id(root: str, tmdb_id: int | str | None) -> str | None:
+    """Return a directory name under root that carries [tmdbid-N]."""
+    if root is None or tmdb_id is None:
+        return None
+    try:
+        tid = int(tmdb_id)
+    except (TypeError, ValueError):
+        return None
+    if not os.path.isdir(root):
+        return None
+    index = _get_folder_index(root)
+    if index is None:
+        return None
+    names = index.by_tmdb.get(tid) or []
+    if not names:
+        return None
+    # Prefer TMDB-tagged folders; shortest name wins when duplicates exist.
+    return sorted(names, key=len)[0]
 
 
 def resolve_series_folder_name(series_name: str, strm_path: str | None = None) -> str:
@@ -2864,6 +2910,8 @@ def default_strm_sync_status() -> dict:
         "movies_elapsed_sec": 0.0,
         "series_elapsed_sec": 0.0,
         "total_elapsed_sec": 0.0,
+        "heartbeat_unix": 0.0,
+        "heartbeat_at": "",
         "log": [],
     }
 

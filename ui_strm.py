@@ -584,7 +584,9 @@ def render_strm_sync_section(host: str, user: str, pw: str) -> None:
 
         if last_sync and not running:
             sync_cfg = load_strm_sync_config()
-            summary_lines: list[str] = []
+            summary_lines: list[str] = [
+                t("strm_sync_summary_when", time=last_sync)
+            ]
             if sync_cfg.get("sync_movies"):
                 removed_movies = int(status.get("movies_removed") or 0)
                 removed_suffix = (

@@ -31,6 +31,7 @@ from core import (
     prepare_output_dir,
     read_strm_url,
     run_ytdlp,
+    xtream_playback_blocks_extra_streams,
     _save_json_file,
 )
 
@@ -775,6 +776,9 @@ def download_intro_sample(
     log: LogFn | None = None,
 ) -> bool:
     """Download only the first N seconds (copy) for intro analysis."""
+    if xtream_playback_blocks_extra_streams():
+        _log(log, "Intro sample saltato: riproduzione strm in corso (1 connessione Xtream)")
+        return False
     prepare_output_dir(os.path.dirname(out_path))
     if os.path.isfile(out_path) and os.path.getsize(out_path) > 2_000_000:
         return True
@@ -839,6 +843,9 @@ def download_full_hidden_local(
     log: LogFn | None = None,
 ) -> str | None:
     """Full episode download kept as .proxysource (strm preserved, JF sees proxy)."""
+    if xtream_playback_blocks_extra_streams():
+        _log(log, "Intro keep-local saltato: riproduzione strm in corso")
+        return None
     from stream_proxy import register_episode_proxy, update_episode_proxy_local_path
 
     _folder, local_path = build_episode_output(
@@ -1138,6 +1145,7 @@ def ensure_intro_for_episode(
     config: dict | None = None,
     log: LogFn | None = None,
     force: bool = False,
+    allow_xtream: bool = True,
 ) -> dict:
     """Ensure intro MediaSegment exists; download+hide if needed, then cleanup."""
     cfg = config or {}
@@ -1185,6 +1193,7 @@ def ensure_intro_for_episode(
     local = find_local_episode_video(series_folder, season, episode)
     created = False
     analysis_source = local or ""
+    allow_xtream = bool(allow_xtream) and not xtream_playback_blocks_extra_streams()
 
     if not local and allow_download:
         remote_url, _entry = resolve_episode_remote_url(
@@ -1194,6 +1203,14 @@ def ensure_intro_for_episode(
             strm_path=strm_path,
         )
         if keep_until_watched:
+            if not allow_xtream:
+                result["error"] = "deferred_xtream"
+                _log(
+                    log,
+                    f"Intro skip S{season:02d}E{episode:02d}: Xtream differito "
+                    f"(riproduzione strm in corso)",
+                )
+                return result
             local, created = ensure_analysis_file(
                 series_folder=series_folder,
                 season=season,
@@ -1204,7 +1221,7 @@ def ensure_intro_for_episode(
             )
             analysis_source = local or ""
             result["downloaded"] = created
-        elif remote_url:
+        elif remote_url and allow_xtream:
             _log(log, f"Intro skip S{season:02d}E{episode:02d}: analisi stream remoto")
             pushed = _push_detected_windows(
                 client,
@@ -1231,6 +1248,14 @@ def ensure_intro_for_episode(
             )
             analysis_source = local or ""
             result["downloaded"] = created
+        elif remote_url and not allow_xtream:
+            result["error"] = "deferred_xtream"
+            _log(
+                log,
+                f"Intro skip S{season:02d}E{episode:02d}: Xtream differito "
+                f"(riproduzione strm in corso)",
+            )
+            return result
         else:
             local, created = ensure_analysis_file(
                 series_folder=series_folder,
@@ -1324,6 +1349,7 @@ def ensure_season_intros(
     only_episode: int | None = None,
     from_episode: int | None = None,
     server: str = "jellyfin",
+    allow_xtream: bool = True,
 ) -> dict:
     """Ensure Intro segments; may download hidden samples for missing locals."""
     cfg = config or {}
@@ -1374,6 +1400,7 @@ def ensure_season_intros(
             series_id=series_id,
             config=cfg,
             log=log,
+            allow_xtream=allow_xtream,
         )
         summary["episodes"].append(info)
         if info.get("downloaded"):

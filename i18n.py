@@ -596,6 +596,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         ),
         "strm_last_sync": "Last completed sync: {time}",
         "strm_sync_summary_title": "Last sync summary",
+        "strm_sync_summary_when": "Run date: {time}",
         "strm_sync_summary_movies": (
             "Movies ({duration}): {created} created, {updated} updated, "
             "{skipped} skipped, {excluded} excluded, {unmatched} no TMDB match, "
@@ -1258,6 +1259,7 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         ),
         "strm_last_sync": "Ultima sync completata: {time}",
         "strm_sync_summary_title": "Riepilogo ultima sync",
+        "strm_sync_summary_when": "Data esecuzione: {time}",
         "strm_sync_summary_movies": (
             "Film ({duration}): {created} creati, {updated} aggiornati, "
             "{skipped} saltati, {excluded} esclusi, {unmatched} senza match TMDB, "

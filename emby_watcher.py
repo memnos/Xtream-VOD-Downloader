@@ -99,6 +99,8 @@ class PlayingItem:
 
 PlayingEpisode = PlayingItem
 
+DEFER_XTREAM_ASSIST_IDLE_SEC = 120
+
 
 @dataclass
 class QueueItem:
@@ -626,6 +628,8 @@ class AutoDownloadWatcher:
         self._prefetch_decision_key: str | None = None
         self._prefetch_stay_notified_key: str | None = None
         self._assist_scheduled: set[str] = set()
+        self._deferred_xtream_assist: dict | None = None
+        self._xtream_assist_idle_after: float = 0.0
         self._abort_output_files: set[str] = set()
         self._pending_watched_movie_cleanup: str | None = None
 
@@ -851,6 +855,9 @@ class AutoDownloadWatcher:
                 self._prefetch_stay_notified_key = None
             if assist_on and playing.item_type == "Episode":
                 self._maybe_schedule_playback_assist(playing, active_session, config)
+            if self._deferred_xtream_assist:
+                # Keep delaying while a strm (or any item) is still playing.
+                self._xtream_assist_idle_after = 0.0
             if auto_dl and playing.blocks_download:
                 prefetch_on = bool(config.get("prefetch_playing_strm"))
                 if prefetch_on:
@@ -903,6 +910,13 @@ class AutoDownloadWatcher:
             self._prefetch_stay_notified_key = None
             self._record_playback(ended)
 
+            if was_strm and self._deferred_xtream_assist:
+                self._xtream_assist_idle_after = time.time() + DEFER_XTREAM_ASSIST_IDLE_SEC
+                self._log(
+                    f"Assist Xtream in attesa {DEFER_XTREAM_ASSIST_IDLE_SEC}s "
+                    f"dopo strm (1 connessione provider)"
+                )
+
             if auto_dl:
                 if was_strm and self._paused_download is not None:
                     self._skip_cooldown_once = True
@@ -929,6 +943,8 @@ class AutoDownloadWatcher:
                     )
                 elif ended.item_type == "Movie" and ended_session:
                     self._maybe_cleanup_watched_movie(ended, ended_session, config)
+
+        self._maybe_run_deferred_xtream_assist()
 
         if not auto_dl:
             return
@@ -1004,93 +1020,22 @@ class AutoDownloadWatcher:
                 if mapped.lower().endswith(".strm"):
                     strm_path = mapped
 
-        client = session.client
-        user_id = session.user_id
-        series_id = playing.series_id
-        label = playing.display_label()
+        defer_xtream = bool(playing.blocks_download)
+        payload = {
+            "playing": playing,
+            "session": session,
+            "config": config,
+            "series_folder": series_folder,
+            "strm_path": strm_path,
+            "assist_key": assist_key,
+        }
+        if defer_xtream:
+            self._deferred_xtream_assist = payload
+            self._xtream_assist_idle_after = 0.0
 
         def _job() -> None:
-            self._log(
-                f"Assist riproduzione: {label} "
-                f"(intro={bool(config.get('auto_intro_skip_enabled'))}, "
-                f"subs={bool(config.get('auto_subs_enabled'))})"
-            )
-            server = playing.server_id or session.server_id or "jellyfin"
+            self._run_playback_assist_job(payload, xtream_ok=not defer_xtream)
 
-            # 1) Current episode first: intro + subs (so playback gets them ASAP).
-            if config.get("auto_intro_skip_enabled") and series_folder:
-                try:
-                    from intro_skip import ensure_intro_for_episode
-
-                    info = ensure_intro_for_episode(
-                        client,
-                        item_id=playing.item_id,
-                        series_folder=series_folder,
-                        season=season,
-                        episode=episode,
-                        strm_path=strm_path,
-                        series_id=series_id,
-                        config=config,
-                        log=self._log,
-                    )
-                    self._log(
-                        f"Intro skip S{season:02d}E{episode:02d}: "
-                        f"ok={info.get('ok')} skip={info.get('skipped')} "
-                        f"err={info.get('error') or '-'}"
-                    )
-                except Exception as exc:
-                    self._log(f"Intro skip episodio corrente: {exc}")
-            elif config.get("auto_intro_skip_enabled") and not series_folder:
-                self._log(f"Intro skip: cartella serie sconosciuta per {label}")
-
-            if config.get("auto_subs_enabled"):
-                try:
-                    from auto_subtitles import ensure_season_subtitles
-
-                    summary = ensure_season_subtitles(
-                        client,
-                        user_id=user_id,
-                        series_id=series_id,
-                        season=season,
-                        config=config,
-                        from_episode=episode,
-                        prefer_forced=bool(config.get("auto_subs_prefer_forced", True)),
-                        language=str(config.get("auto_subs_language") or "it"),
-                        log=self._log,
-                    )
-                    self._log(
-                        f"Sottotitoli S{season:02d} da E{episode:02d}: "
-                        f"ok={summary.get('ok')} skip={summary.get('skipped')} "
-                        f"fail={summary.get('failed')}"
-                    )
-                except Exception as exc:
-                    self._log(f"Sottotitoli errore: {exc}")
-
-            # 2) Rest of season intros in background (no blocking downloads for current play).
-            if config.get("auto_intro_skip_enabled") and series_folder:
-                try:
-                    from intro_skip import ensure_season_intros
-
-                    summary = ensure_season_intros(
-                        client,
-                        user_id=user_id,
-                        series_id=series_id,
-                        season=season,
-                        series_folder=series_folder,
-                        config=config,
-                        log=self._log,
-                        from_episode=episode + 1,
-                        server=server,
-                    )
-                    self._log(
-                        f"Intro skip S{season:02d} resto: ok={summary.get('ok')} "
-                        f"skip={summary.get('skipped')} fail={summary.get('failed')} "
-                        f"dl={summary.get('downloaded')} cleaned={summary.get('cleaned')}"
-                    )
-                except Exception as exc:
-                    self._log(f"Intro skip resto stagione: {exc}")
-
-        # Reuse intro_skip scheduler for dedupe of concurrent identical keys
         try:
             from intro_skip import schedule_intro_job
 
@@ -1099,6 +1044,132 @@ class AutoDownloadWatcher:
                 self._assist_scheduled.discard(assist_key)
         except Exception:
             threading.Thread(target=_job, daemon=True, name="playback-assist").start()
+
+    def _run_playback_assist_job(self, payload: dict, *, xtream_ok: bool) -> None:
+        playing: PlayingItem = payload["playing"]
+        session: MediaSession = payload["session"]
+        config: dict = payload["config"]
+        series_folder = str(payload.get("series_folder") or "")
+        strm_path = str(payload.get("strm_path") or "")
+        if playing.season is None or playing.episode is None:
+            return
+        season = int(playing.season)
+        episode = int(playing.episode)
+        client = session.client
+        user_id = session.user_id
+        series_id = playing.series_id
+        label = playing.display_label()
+        server = playing.server_id or session.server_id or "jellyfin"
+
+        self._log(
+            f"Assist riproduzione: {label} "
+            f"(intro={bool(config.get('auto_intro_skip_enabled'))}, "
+            f"subs={bool(config.get('auto_subs_enabled'))}"
+            f"{'' if xtream_ok else ', xtream=defer'})"
+        )
+
+        if config.get("auto_intro_skip_enabled") and series_folder:
+            try:
+                from intro_skip import ensure_intro_for_episode
+
+                info = ensure_intro_for_episode(
+                    client,
+                    item_id=playing.item_id,
+                    series_folder=series_folder,
+                    season=season,
+                    episode=episode,
+                    strm_path=strm_path,
+                    series_id=series_id,
+                    config=config,
+                    log=self._log,
+                    allow_xtream=xtream_ok,
+                )
+                self._log(
+                    f"Intro skip S{season:02d}E{episode:02d}: "
+                    f"ok={info.get('ok')} skip={info.get('skipped')} "
+                    f"err={info.get('error') or '-'}"
+                )
+            except Exception as exc:
+                self._log(f"Intro skip episodio corrente: {exc}")
+        elif config.get("auto_intro_skip_enabled") and not series_folder:
+            self._log(f"Intro skip: cartella serie sconosciuta per {label}")
+
+        if config.get("auto_subs_enabled"):
+            try:
+                from auto_subtitles import ensure_season_subtitles
+
+                summary = ensure_season_subtitles(
+                    client,
+                    user_id=user_id,
+                    series_id=series_id,
+                    season=season,
+                    config=config,
+                    from_episode=episode,
+                    prefer_forced=bool(config.get("auto_subs_prefer_forced", True)),
+                    language=str(config.get("auto_subs_language") or "it"),
+                    log=self._log,
+                    verify_playback_info=xtream_ok,
+                )
+                self._log(
+                    f"Sottotitoli S{season:02d} da E{episode:02d}: "
+                    f"ok={summary.get('ok')} skip={summary.get('skipped')} "
+                    f"fail={summary.get('failed')}"
+                )
+            except Exception as exc:
+                self._log(f"Sottotitoli errore: {exc}")
+
+        if not xtream_ok:
+            self._log(
+                "Intro resto stagione differito: riproduzione strm "
+                "(il provider permette 1 sola connessione)"
+            )
+            return
+
+        if config.get("auto_intro_skip_enabled") and series_folder:
+            try:
+                from intro_skip import ensure_season_intros
+
+                summary = ensure_season_intros(
+                    client,
+                    user_id=user_id,
+                    series_id=series_id,
+                    season=season,
+                    series_folder=series_folder,
+                    config=config,
+                    log=self._log,
+                    from_episode=episode + 1,
+                    server=server,
+                    allow_xtream=True,
+                )
+                self._log(
+                    f"Intro skip S{season:02d} resto: ok={summary.get('ok')} "
+                    f"skip={summary.get('skipped')} fail={summary.get('failed')} "
+                    f"dl={summary.get('downloaded')} cleaned={summary.get('cleaned')}"
+                )
+            except Exception as exc:
+                self._log(f"Intro skip resto stagione: {exc}")
+
+    def _maybe_run_deferred_xtream_assist(self) -> None:
+        payload = self._deferred_xtream_assist
+        after = self._xtream_assist_idle_after
+        if not payload or after <= 0 or time.time() < after:
+            return
+        if self._watching_item is not None:
+            return
+        self._deferred_xtream_assist = None
+        self._xtream_assist_idle_after = 0.0
+        assist_key = str(payload.get("assist_key") or "deferred")
+        self._log("Assist Xtream ripreso dopo idle (intro + probe sottotitoli)")
+
+        def _job() -> None:
+            self._run_playback_assist_job(payload, xtream_ok=True)
+
+        try:
+            from intro_skip import schedule_intro_job
+
+            schedule_intro_job(f"assist-deferred:{assist_key}", _job)
+        except Exception:
+            threading.Thread(target=_job, daemon=True, name="playback-assist-deferred").start()
 
     def _start_download_thread(self, paused: PausedDownload) -> None:
         self._download_thread = threading.Thread(

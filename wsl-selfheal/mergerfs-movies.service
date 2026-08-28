@@ -10,16 +10,18 @@ RequiresMountsFor=/mnt/wsl/HDD1
 StartLimitIntervalSec=0
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+Type=simple
 # Pulisce un eventuale mount FUSE rimasto appeso (stale) prima di rimontare.
 # Il prefisso '-' rende l'errore non fatale quando non c'e' nulla da smontare.
 ExecStartPre=-/bin/umount -l /mnt/wsl/union/Movies
 ExecStartPre=/bin/mkdir -p /mnt/wsl/union/Movies
 ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do mountpoint -q /mnt/wsl/HDD1 && test -d /mnt/wsl/HDD1/Movies && exit 0; sleep 1; done; echo "HDD1 o Movies non pronti"; exit 1'
-ExecStart=/usr/bin/mergerfs -o allow_other,use_ino,category.create=ff,minfreespace=4G,fsname=mergerfs_Movies /mnt/wsl/HDD1/Movies:/home/fabio/m3u-editor/movies /mnt/wsl/union/Movies
-ExecStop=/usr/bin/fusermount3 -u /mnt/wsl/union/Movies
-# Se mergerfs muore, riprova da solo
+# -f: foreground, cosi systemd tiene il PID e Restart=on-failure funziona davvero
+ExecStart=/usr/bin/mergerfs -f -o allow_other,use_ino,category.create=ff,minfreespace=4G,fsname=mergerfs_Movies /mnt/wsl/HDD1/Movies:/home/fabio/m3u-editor/movies /mnt/wsl/union/Movies
+ExecStop=-/usr/bin/fusermount3 -uz /mnt/wsl/union/Movies
+KillMode=mixed
+TimeoutStartSec=90
+TimeoutStopSec=20
 Restart=on-failure
 RestartSec=5
 

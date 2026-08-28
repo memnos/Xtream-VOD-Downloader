@@ -8,6 +8,7 @@ promoted to the working directory without redoing the matching.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import threading
@@ -49,11 +50,15 @@ from core import (
 from stream_proxy import resolve_episode_play_url, resolve_movie_play_url
 from tmdb import TmdbClient, clean_title
 
-_sync_lock = threading.Lock()
+_sync_lock = threading.RLock()
 _sync_thread: threading.Thread | None = None
+_heartbeat_stop = threading.Event()
+_status_io_lock = threading.Lock()
 SYNC_PID_FILE = os.environ.get(
     "STRM_SYNC_PID_FILE", os.path.join(DATA_DIR, "strm_sync.pid")
 )
+HEARTBEAT_INTERVAL_SEC = float(os.environ.get("STRM_SYNC_HEARTBEAT_SEC", "10"))
+STALE_HEARTBEAT_SEC = int(os.environ.get("STRM_SYNC_STALE_HEARTBEAT_SEC", "180"))
 M3U_ATTR_RE = re.compile(r'([\w-]+)="([^"]*)"')
 M3U_SERIES_URL_RE = re.compile(
     r"/series/[^/]+/[^/]+/(\d+)\.([A-Za-z0-9]+)(?:[?#].*)?$",
@@ -121,8 +126,16 @@ def _append_sync_summary(status: dict, config: dict) -> None:
         _append_log(status, line)
 
 
+def _touch_heartbeat(status: dict) -> None:
+    now = time.time()
+    status["heartbeat_unix"] = now
+    status["heartbeat_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _save_status(status: dict) -> None:
-    save_strm_sync_status(status)
+    _touch_heartbeat(status)
+    with _status_io_lock:
+        save_strm_sync_status(status)
 
 
 def _fetch_categories(host: str, user: str, password: str, action: str) -> dict[str, str]:
@@ -473,6 +486,10 @@ def _sync_movie_version_group(
             saw_unmatched = True
             continue
         last_path = strm_path
+
+        local_action = _skip_strm_when_local_exists(strm_path)
+        if local_action:
+            return local_action, strm_path
 
         if os.path.isfile(strm_path) and not update_existing:
             existing_url = read_strm_url(strm_path)
@@ -1060,10 +1077,21 @@ def _build_tmdb_client(config: dict) -> TmdbClient | None:
 
 def run_strm_sync(host: str, user: str, password: str, config: dict | None = None) -> None:
     config = config or load_strm_sync_config()
+    previous = load_strm_sync_status()
     status = default_strm_sync_status()
     status["running"] = True
+    status["schedule_last_run"] = str(previous.get("schedule_last_run") or "")
+    status["schedule_next_run"] = str(previous.get("schedule_next_run") or "")
+    if not status["schedule_next_run"] and config.get("schedule_enabled"):
+        from strm_scheduler import compute_next_scheduled_run, format_schedule_time
+
+        nxt = compute_next_scheduled_run(config)
+        if nxt is not None:
+            status["schedule_next_run"] = format_schedule_time(nxt)
+    _stop_sync_heartbeat()
     _write_sync_pid()
     _save_status(status)
+    _start_sync_heartbeat(status)
 
     tmdb_client = _build_tmdb_client(config)
     sync_started = time.perf_counter()
@@ -1073,6 +1101,11 @@ def run_strm_sync(host: str, user: str, password: str, config: dict | None = Non
             purged = tmdb_client.purge_expired_negative_cache()
             if purged:
                 _append_log(status, f"TMDB: purged {purged} expired no-match cache entries")
+                try:
+                    tmdb_client.save_cache()
+                except Exception:
+                    pass
+                _save_status(status)
         allow_4k = bool(config.get("allow_4k", False))
         update_existing = bool(config.get("update_existing", True))
         remove_missing = bool(config.get("remove_missing", False))
@@ -1096,18 +1129,22 @@ def run_strm_sync(host: str, user: str, password: str, config: dict | None = Non
             status["progress_text"] = "Loading movie catalog..."
             _append_log(status, status["progress_text"])
             _save_status(status)
-
-            vod_category_map = _fetch_categories(host, user, password, "get_vod_categories")
-            vod_ids = [str(cid) for cid in config.get("vod_category_ids", []) if cid]
-            if vod_ids:
-                movies: list[dict] = []
-                for idx, cat_id in enumerate(vod_ids):
-                    status["progress_text"] = f"Movies — category {idx + 1}/{len(vod_ids)}"
-                    _save_status(status)
-                    movies.extend(_fetch_vod_streams(host, user, password, cat_id))
-            else:
-                movies = _fetch_vod_streams(host, user, password, None)
-                movies = exclude_hidden_items(movies, "vod")
+            try:
+                vod_category_map = _fetch_categories(host, user, password, "get_vod_categories")
+                vod_ids = [str(cid) for cid in config.get("vod_category_ids", []) if cid]
+                if vod_ids:
+                    movies: list[dict] = []
+                    for idx, cat_id in enumerate(vod_ids):
+                        status["progress_text"] = f"Movies — category {idx + 1}/{len(vod_ids)}"
+                        _save_status(status)
+                        movies.extend(_fetch_vod_streams(host, user, password, cat_id))
+                else:
+                    movies = _fetch_vod_streams(host, user, password, None)
+                    movies = exclude_hidden_items(movies, "vod")
+            except Exception as exc:
+                raise RuntimeError(f"Movie catalog fetch failed: {exc}") from exc
+            _append_log(status, f"Movie catalog loaded: {len(movies)} streams")
+            _save_status(status)
 
             from discarded_movie_streams import load_discarded_streams
 
@@ -1224,20 +1261,24 @@ def run_strm_sync(host: str, user: str, password: str, config: dict | None = Non
             status["progress_text"] = "Loading series catalog..."
             _append_log(status, status["progress_text"])
             _save_status(status)
-
-            series_category_map = _fetch_categories(
-                host, user, password, "get_series_categories"
-            )
-            series_ids = [str(cid) for cid in config.get("series_category_ids", []) if cid]
-            if series_ids:
-                series_list: list[dict] = []
-                for idx, cat_id in enumerate(series_ids):
-                    status["progress_text"] = f"Series — category {idx + 1}/{len(series_ids)}"
-                    _save_status(status)
-                    series_list.extend(_fetch_series_catalog(host, user, password, cat_id))
-            else:
-                series_list = _fetch_series_catalog(host, user, password, None)
-                series_list = exclude_hidden_items(series_list, "series")
+            try:
+                series_category_map = _fetch_categories(
+                    host, user, password, "get_series_categories"
+                )
+                series_ids = [str(cid) for cid in config.get("series_category_ids", []) if cid]
+                if series_ids:
+                    series_list: list[dict] = []
+                    for idx, cat_id in enumerate(series_ids):
+                        status["progress_text"] = f"Series — category {idx + 1}/{len(series_ids)}"
+                        _save_status(status)
+                        series_list.extend(_fetch_series_catalog(host, user, password, cat_id))
+                else:
+                    series_list = _fetch_series_catalog(host, user, password, None)
+                    series_list = exclude_hidden_items(series_list, "series")
+            except Exception as exc:
+                raise RuntimeError(f"Series catalog fetch failed: {exc}") from exc
+            _append_log(status, f"Series catalog loaded: {len(series_list)} series")
+            _save_status(status)
 
             filtered_series: list[dict] = []
             for series in series_list:
@@ -1520,6 +1561,7 @@ def run_strm_sync(host: str, user: str, password: str, config: dict | None = Non
         if status.get("movies_elapsed_sec") or status.get("series_elapsed_sec"):
             _append_sync_summary(status, config)
     finally:
+        _stop_sync_heartbeat()
         if tmdb_client is not None:
             try:
                 tmdb_client.save_cache()
@@ -1536,11 +1578,75 @@ def run_strm_sync(host: str, user: str, password: str, config: dict | None = Non
         _save_status(status)
 
 
+def _start_sync_heartbeat(status: dict) -> None:
+    """Keep heartbeat fresh even while Xtream catalog requests are blocking."""
+    _heartbeat_stop.clear()
+
+    def _loop() -> None:
+        while not _heartbeat_stop.wait(HEARTBEAT_INTERVAL_SEC):
+            try:
+                _save_status(status)
+            except Exception:
+                pass
+
+    threading.Thread(target=_loop, name="strm-sync-heartbeat", daemon=True).start()
+
+
+def _stop_sync_heartbeat() -> None:
+    _heartbeat_stop.set()
+
+
+def _heartbeat_age_sec(status: dict | None = None) -> float | None:
+    status = status if status is not None else load_strm_sync_status()
+    try:
+        hb = float(status.get("heartbeat_unix") or 0)
+    except (TypeError, ValueError):
+        return None
+    if hb <= 0:
+        return None
+    return max(0.0, time.time() - hb)
+
+
+def _heartbeat_is_stale(status: dict | None = None) -> bool:
+    age = _heartbeat_age_sec(status)
+    if age is None:
+        return True
+    return age >= STALE_HEARTBEAT_SEC
+
+
+def _process_starttime(pid: int) -> str:
+    """Linux starttime ticks from /proc, uniquely identifying a PID instance."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as handle:
+            raw = handle.read()
+        close = raw.rfind(")")
+        if close < 0:
+            return ""
+        fields = raw[close + 2 :].split()
+        return fields[19] if len(fields) > 19 else ""
+    except (OSError, IndexError):
+        return ""
+
+
+def _boot_id() -> str:
+    try:
+        with open("/proc/sys/kernel/random/boot_id", encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
 def _write_sync_pid() -> None:
+    pid = os.getpid()
+    payload = {
+        "pid": pid,
+        "starttime": _process_starttime(pid),
+        "boot_id": _boot_id(),
+    }
     try:
         os.makedirs(os.path.dirname(SYNC_PID_FILE) or ".", exist_ok=True)
         with open(SYNC_PID_FILE, "w", encoding="utf-8") as handle:
-            handle.write(str(os.getpid()))
+            json.dump(payload, handle)
     except OSError:
         pass
 
@@ -1552,46 +1658,109 @@ def _clear_sync_pid() -> None:
         pass
 
 
-def _sync_pid_alive() -> bool:
-    """True if strm_sync.pid points at a living process (any worker owning the sync)."""
+def _read_sync_pid_record() -> dict | None:
     try:
         with open(SYNC_PID_FILE, encoding="utf-8") as handle:
-            pid = int((handle.read() or "").strip())
-    except (OSError, ValueError):
-        return False
+            raw = (handle.read() or "").strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        try:
+            pid = int(data.get("pid"))
+        except (TypeError, ValueError):
+            return None
+        if pid <= 0:
+            return None
+        return {
+            "pid": pid,
+            "starttime": str(data.get("starttime") or ""),
+            "boot_id": str(data.get("boot_id") or ""),
+        }
+    try:
+        pid = int(raw)
+    except ValueError:
+        return None
     if pid <= 0:
-        return False
+        return None
+    return {"pid": pid, "starttime": "", "boot_id": ""}
+
+
+def _pid_is_running(pid: int) -> bool:
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
-        # Process exists but we can't signal it — treat as alive.
         return True
     except OSError:
         return False
     return True
 
 
+def _pid_record_is_live() -> bool:
+    """True if the PID file names a still-running foreign owner.
+
+    The PID file used to store only a number. After a container restart the
+    watcher often reuses the same low PID (e.g. 12), so a mere kill(pid, 0)
+    kept the lock forever. Identity is pid + /proc starttime (+ boot id).
+    """
+    record = _read_sync_pid_record()
+    if not record:
+        return False
+    pid = int(record["pid"])
+    if pid == os.getpid():
+        # This process reused the PID; we only count as owner if our thread lives.
+        return False
+    if not _pid_is_running(pid):
+        return False
+    expected_start = str(record.get("starttime") or "")
+    if expected_start:
+        if _process_starttime(pid) != expected_start:
+            return False
+        expected_boot = str(record.get("boot_id") or "")
+        current_boot = _boot_id()
+        if expected_boot and current_boot and expected_boot != current_boot:
+            return False
+        return True
+    # Legacy pid-only file: do not trust a reused PID without a fresh heartbeat.
+    return not _heartbeat_is_stale()
+
+
+def _sync_pid_alive() -> bool:
+    """True if a live thread or process still owns the in-progress sync."""
+    with _sync_lock:
+        if _sync_thread is not None and _sync_thread.is_alive():
+            return True
+    return _pid_record_is_live()
+
+
 def clear_stale_sync_running(*, reason: str = "process restarted") -> bool:
     """If status says running but no live owner, clear the flag. Returns True if cleared."""
-    with _sync_lock:
-        alive = _sync_thread is not None and _sync_thread.is_alive()
-    if alive or _sync_pid_alive():
+    if _sync_pid_alive():
         return False
     status = load_strm_sync_status()
-    if not status.get("running"):
+    pid_leftover = os.path.isfile(SYNC_PID_FILE)
+    if not status.get("running") and not pid_leftover:
         return False
-    status["running"] = False
-    if not status.get("last_error"):
-        status["last_error"] = f"Sync interrupted ({reason})."
-    log = status.setdefault("log", [])
-    if isinstance(log, list):
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        log.append(f"[{timestamp}] Cleared stale running=True ({reason})")
-        status["log"] = log[-80:]
+    if status.get("running"):
+        status["running"] = False
+        if not status.get("last_error"):
+            status["last_error"] = f"Sync interrupted ({reason})."
+        log = status.setdefault("log", [])
+        if isinstance(log, list):
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            log.append(f"[{timestamp}] Cleared stale running=True ({reason})")
+            status["log"] = log[-80:]
+        _save_status(status)
     _clear_sync_pid()
-    _save_status(status)
     return True
 
 
@@ -1612,7 +1781,7 @@ def start_strm_sync(host: str, user: str, password: str, config: dict | None = N
     with _sync_lock:
         if _sync_thread is not None and _sync_thread.is_alive():
             return False
-        if _sync_pid_alive() or load_strm_sync_status().get("running"):
+        if _pid_record_is_live() or load_strm_sync_status().get("running"):
             return False
 
         def _worker() -> None:

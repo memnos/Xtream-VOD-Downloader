@@ -292,6 +292,33 @@ class LocalStrmHelpersTest(unittest.TestCase):
             with patch("core.SERIES_DOWNLOAD_PATHS", (dl_root,)):
                 self.assertEqual(find_local_files_for_strm(strm_path), [marked])
 
+    def test_find_local_movie_matches_by_tmdb_when_titles_differ(self):
+        """IT strm folder vs EN Radarr folder sharing the same tmdbid."""
+        with tempfile.TemporaryDirectory() as tmp:
+            strm_root = os.path.join(tmp, "strm")
+            dl_root = os.path.join(tmp, "download")
+            strm_folder = "Official Secrets - Segreto di stato (2019) [tmdbid-393624]"
+            dl_folder = "Official Secrets (2019) [tmdbid-393624]"
+            os.makedirs(os.path.join(strm_root, strm_folder))
+            os.makedirs(os.path.join(dl_root, dl_folder))
+            strm_path = os.path.join(strm_root, strm_folder, f"{strm_folder}.strm")
+            local_path = os.path.join(
+                dl_root,
+                dl_folder,
+                "Official Secrets (2019)-Bluray-1080p.mkv",
+            )
+            with open(strm_path, "w", encoding="utf-8") as handle:
+                handle.write("http://example/stream\n")
+            with open(local_path, "wb") as handle:
+                handle.write(b"video")
+
+            with patch("core.DOWNLOAD_MOVIES_PATH", dl_root), patch(
+                "core.STRM_OUTPUT_MOVIES_PATH", strm_root
+            ):
+                clear_folder_match_cache()
+                self.assertTrue(local_download_exists_for_strm(strm_path))
+                self.assertEqual(find_local_files_for_strm(strm_path), [local_path])
+
 
 if __name__ == "__main__":
     unittest.main()

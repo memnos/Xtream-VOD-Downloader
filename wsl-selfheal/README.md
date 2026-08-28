@@ -8,11 +8,12 @@ Docker dipende (`Requires=`) da quei servizi, quindi non si avvia.
 ## Cosa fa
 
 1. **Hardening dei servizi mergerfs** (`mergerfs-*.service`):
+   - `Type=simple` + `mergerfs -f` (foreground): systemd tiene il PID, `Restart=on-failure` riparte da solo se il processo muore.
    - `ExecStartPre=-/bin/umount -l ...` ripulisce un eventuale mount stale prima di rimontare.
    - `StartLimitIntervalSec=0` evita il blocco "Start request repeated too quickly".
-   - `Restart=on-failure` per riprovare da solo.
 2. **Watchdog** (`mergerfs-docker-watchdog.timer` -> `.service` -> `mergerfs-docker-healthcheck.sh`):
    ogni 60s controlla union mount, servizi e Docker; se trova un problema ripristina automaticamente.
+   Smonta solo su `ENOTCONN` o mergerfs morto. Un timeout su HDD USB lento (con processo vivo) viene ritentato e **non** provoca umount.
 
 ## Percorsi di installazione
 

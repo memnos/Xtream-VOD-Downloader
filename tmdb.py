@@ -5,9 +5,12 @@ title (+ year for movies), so it is independent of the output folder. This means
 you can generate into a test directory and later re-run into the working
 directory without paying the TMDB lookup cost again.
 
-Positive matches are kept indefinitely. Negative (no-match) results are also
-cached so repeated syncs do not re-query TMDB for the same miss; they expire
-after NEGATIVE_CACHE_TTL_SECONDS and are retried then.
+Positive title matches are kept indefinitely. TV season episode counts are
+also cached, but a stale count would treat newly aired episodes as phantoms:
+if validation fails and the season cache is older than
+SEASON_COUNTS_TTL_SECONDS, TMDB is queried again. Negative (no-match) results
+are cached so repeated syncs do not re-query TMDB for the same miss; they
+expire after NEGATIVE_CACHE_TTL_SECONDS and are retried then.
 """
 
 from __future__ import annotations
@@ -28,6 +31,10 @@ BASE_URL = "https://api.themoviedb.org/3"
 # Retry unmatched titles after a week (new TMDB entries, title cleanups, etc.).
 NEGATIVE_CACHE_TTL_SECONDS = int(
     os.environ.get("TMDB_NEGATIVE_CACHE_TTL_SECONDS", str(7 * 24 * 3600))
+)
+# Refresh season episode_count when an episode would be rejected as a phantom.
+SEASON_COUNTS_TTL_SECONDS = int(
+    os.environ.get("TMDB_SEASON_COUNTS_TTL_SECONDS", str(12 * 3600))
 )
 
 YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
@@ -92,6 +99,7 @@ class TmdbClient:
         rate_limit: int = 40,
         window_seconds: float = 10.0,
         negative_ttl_seconds: int | None = None,
+        season_counts_ttl_seconds: int | None = None,
     ) -> None:
         self.api_key = (api_key or "").strip()
         self.language = language or "it-IT"
@@ -101,6 +109,11 @@ class TmdbClient:
             NEGATIVE_CACHE_TTL_SECONDS
             if negative_ttl_seconds is None
             else max(0, int(negative_ttl_seconds))
+        )
+        self.season_counts_ttl_seconds = (
+            SEASON_COUNTS_TTL_SECONDS
+            if season_counts_ttl_seconds is None
+            else max(0, int(season_counts_ttl_seconds))
         )
         self._request_times: list[float] = []
         self._rate_lock = threading.Lock()
@@ -327,7 +340,36 @@ class TmdbClient:
         self._store(key, entry)
         return entry
 
-    def get_tv_season_episode_counts(self, tmdb_id: int) -> dict[int, int] | None:
+    @staticmethod
+    def _season_counts_from_entry(entry: dict | None) -> dict[int, int] | None:
+        if not entry or not entry.get("matched"):
+            return None
+        raw = entry.get("seasons") or {}
+        out: dict[int, int] = {}
+        for season_key, count in raw.items():
+            try:
+                season_num = int(season_key)
+                episode_count = int(count)
+            except (TypeError, ValueError):
+                continue
+            if season_num >= 0 and episode_count > 0:
+                out[season_num] = episode_count
+        return out or None
+
+    def _tv_seasons_cache_age(self, tmdb_id: int) -> float | None:
+        key = f"tv_seasons:{int(tmdb_id)}"
+        with self._cache_lock:
+            entry = self._cache.get(key)
+        if not entry:
+            return None
+        cached_at = float(entry.get("cached_at") or 0)
+        if not cached_at:
+            return None
+        return time.time() - cached_at
+
+    def get_tv_season_episode_counts(
+        self, tmdb_id: int, *, force_refresh: bool = False
+    ) -> dict[int, int] | None:
         """Return {season_number: episode_count} for a TMDB TV series (cached)."""
         try:
             tid = int(tmdb_id)
@@ -336,21 +378,12 @@ class TmdbClient:
         if tid <= 0:
             return None
         key = f"tv_seasons:{tid}"
-        cached = self._cached(key)
-        if cached is not None:
-            if not cached.get("matched"):
-                return None
-            raw = cached.get("seasons") or {}
-            out: dict[int, int] = {}
-            for season_key, count in raw.items():
-                try:
-                    season_num = int(season_key)
-                    episode_count = int(count)
-                except (TypeError, ValueError):
-                    continue
-                if season_num >= 0 and episode_count > 0:
-                    out[season_num] = episode_count
-            return out
+        if not force_refresh:
+            cached = self._cached(key)
+            if cached is not None:
+                if not cached.get("matched"):
+                    return None
+                return self._season_counts_from_entry(cached)
 
         self.lookups += 1
         payload = self._get(f"/tv/{tid}", {})
@@ -494,6 +527,18 @@ class TmdbClient:
         if counts is None:
             return None
         max_ep = counts.get(season_num)
+        if max_ep is not None and episode_num <= max_ep:
+            return True
+        # Cached episode_count never expired, so a new TMDB episode (or a new
+        # season) would stay rejected forever. Re-query when the cache is stale.
+        age = self._tv_seasons_cache_age(int(tmdb_id))
+        ttl = self.season_counts_ttl_seconds
+        if age is not None and age < ttl:
+            return False
+        refreshed = self.get_tv_season_episode_counts(tmdb_id, force_refresh=True)
+        if refreshed is None:
+            return False
+        max_ep = refreshed.get(season_num)
         if max_ep is None:
             return False
         return episode_num <= max_ep

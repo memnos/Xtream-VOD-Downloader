@@ -15,7 +15,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from core import STRM_OUTPUT_SERIES_PATH, map_media_server_path_to_local
+from core import (
+    STRM_OUTPUT_SERIES_PATH,
+    map_media_server_path_to_local,
+    xtream_playback_blocks_extra_streams,
+)
 
 # Public API key embedded in Jellyfin Open Subtitles plugin.
 DEFAULT_OPENSUBTITLES_API_KEY = "gUCLWGoAg2PmyseoTM0INFFVPcDCeDlT"
@@ -378,37 +382,23 @@ def jellyfin_attach_subtitle_file(
         return False
 
 
-def jellyfin_publish_http_subtitle(
-    client,
-    *,
-    item_id: str,
-    jf_path: str,
-    sub_http_url: str,
-    language: str = "ita",
-    duration_sec: float = 0.0,
-    size: int = 0,
-) -> bool:
-    """Push an HTTP subtitle URL onto a .strm item via StrmMediaImport.
+def _jf_user_id(client, config: dict | None = None) -> str:
+    uid = str(getattr(client, "_user_id_cache", "") or "").strip()
+    if uid:
+        return uid
+    cfg = config if isinstance(config, dict) else {}
+    username = str(cfg.get("jellyfin_username") or cfg.get("emby_username") or "").strip()
+    resolve = getattr(client, "resolve_user_id", None)
+    if username and callable(resolve):
+        try:
+            return str(resolve(username) or "").strip()
+        except Exception:
+            return ""
+    return ""
 
-    Jellyfin's PlaybackInfo for Protocol=Http rebuilds streams from the remote
-    probe and drops local sidecar SRT. An external subtitle whose Path is itself
-    HTTP(S) is kept and exposed to GuamaFlix / Sodalite / Neptune.
-    """
-    if not client or not item_id or not jf_path or not sub_http_url:
-        return False
-    if not sub_http_url.startswith("http"):
-        return False
-    # Preserve existing A/V streams from the library item when possible.
+
+def _copy_non_subtitle_streams(item: dict) -> list[dict]:
     streams: list[dict] = []
-    try:
-        item = client._get(  # noqa: SLF001
-            f"/Items/{item_id}",
-            params={"Fields": "MediaStreams,RunTimeTicks,Size"},
-        )
-    except Exception:
-        item = {}
-    if not isinstance(item, dict):
-        item = {}
     for s in item.get("MediaStreams") or []:
         if not isinstance(s, dict):
             continue
@@ -417,7 +407,7 @@ def jellyfin_publish_http_subtitle(
             continue
         streams.append(
             {
-                "Index": int(s.get("Index") or len(streams)),
+                "Index": len(streams),
                 "Type": typ,
                 "Codec": s.get("Codec") or "",
                 "Language": s.get("Language") or "",
@@ -428,6 +418,109 @@ def jellyfin_publish_http_subtitle(
                 "IsExternal": False,
             }
         )
+    return streams
+
+
+def _ensure_video_stream(streams: list[dict]) -> list[dict]:
+    """StrmMediaImport Apply replaces the whole stream list — never omit Video."""
+    if any(str(s.get("Type") or "") == "Video" for s in streams):
+        return streams
+    restored = [
+        {
+            "Index": 0,
+            "Type": "Video",
+            "Codec": "h264",
+            "IsExternal": False,
+        }
+    ]
+    restored.extend(streams)
+    for idx, row in enumerate(restored):
+        row["Index"] = idx
+    return restored
+
+
+def _item_has_http_subtitle(item: dict, sub_http_url: str) -> bool:
+    want = (sub_http_url or "").rstrip("/")
+    if not want:
+        return False
+    tail = want.rsplit("/", 1)[-1]
+    for s in item.get("MediaStreams") or []:
+        if not isinstance(s, dict):
+            continue
+        if str(s.get("Type") or "") != "Subtitle":
+            continue
+        path = str(s.get("Path") or "").rstrip("/")
+        if path == want or (tail and path.endswith(tail)):
+            return True
+    return False
+
+
+def _item_has_video_stream(item: dict) -> bool:
+    return any(
+        str(s.get("Type") or "") == "Video"
+        for s in (item.get("MediaStreams") or [])
+        if isinstance(s, dict)
+    )
+
+
+def jellyfin_publish_http_subtitle(
+    client,
+    *,
+    item_id: str,
+    jf_path: str,
+    sub_http_url: str,
+    language: str = "ita",
+    duration_sec: float = 0.0,
+    size: int = 0,
+    user_id: str = "",
+    config: dict | None = None,
+) -> bool:
+    """Push an HTTP subtitle URL onto a .strm item via StrmMediaImport.
+
+    Jellyfin's PlaybackInfo for Protocol=Http rebuilds streams from the remote
+    probe and drops local sidecar SRT. An external subtitle whose Path is itself
+    HTTP(S) is kept and exposed to GuamaFlix / Sodalite / Neptune.
+
+    Apply replaces the entire stream list. We always keep/restore a Video
+    stream so a subtitle-only payload cannot wipe the episode (and GuamaFlix
+    artwork for the series).
+    """
+    if not client or not item_id or not jf_path or not sub_http_url:
+        return False
+    if not sub_http_url.startswith("http"):
+        return False
+    uid = (user_id or _jf_user_id(client, config)).strip()
+    item: dict = {}
+    if uid and hasattr(client, "get_item"):
+        try:
+            fetched = client.get_item(
+                uid, item_id, "MediaStreams,RunTimeTicks,Size,Path"
+            )
+            if isinstance(fetched, dict):
+                item = fetched
+        except Exception:
+            item = {}
+    if not item:
+        try:
+            fetched = client._get(  # noqa: SLF001
+                f"/Users/{uid}/Items/{item_id}" if uid else f"/Items/{item_id}",
+                params={"Fields": "MediaStreams,RunTimeTicks,Size"},
+            )
+            if isinstance(fetched, dict):
+                item = fetched
+        except Exception:
+            item = {}
+    # GET /Items/{id} without userId 400s on current Jellyfin. Never Apply
+    # from an empty item: that publishes subtitle-only and destroys the strm.
+    if not item:
+        return False
+
+    already = _item_has_http_subtitle(item, sub_http_url)
+    has_video = _item_has_video_stream(item)
+    if already and has_video:
+        return True
+
+    streams = _ensure_video_stream(_copy_non_subtitle_streams(item))
     lang = "ita" if language in {"it", "ita"} else language
     streams.append(
         {
@@ -457,9 +550,27 @@ def jellyfin_publish_http_subtitle(
             "/StrmMediaImport/Apply",
             {"Items": [payload_item]},
         )
-        return True
     except Exception:
         return False
+    # Apply can drop episode stills when the previous stream list was invalid.
+    # Image-only refresh (no metadata) re-fetches TMDB stills without pulling
+    # extra OpenSubtitles attachments that would wipe Video again.
+    if not (item.get("ImageTags") or {}):
+        try:
+            client._post(  # noqa: SLF001
+                f"/Items/{item_id}/Refresh",
+                None,
+                params={
+                    "Recursive": "false",
+                    "MetadataRefreshMode": "None",
+                    "ImageRefreshMode": "FullRefresh",
+                    "ReplaceAllMetadata": "false",
+                    "ReplaceAllImages": "false",
+                },
+            )
+        except Exception:
+            pass
+    return True
 
 
 def _jellyfin_pick_italian(entries: list[dict], *, prefer_forced: bool) -> tuple[dict | None, bool]:
@@ -475,90 +586,6 @@ def _jellyfin_pick_italian(entries: list[dict], *, prefer_forced: bool) -> tuple
     return (pool[0] if pool else None), False
 
 
-def jellyfin_publish_http_subtitle(
-    client,
-    *,
-    item_id: str,
-    jf_path: str,
-    sub_http_url: str,
-    language: str = "ita",
-    duration_sec: float = 0.0,
-    size: int = 0,
-) -> bool:
-    """Push an HTTP subtitle URL onto a .strm item via StrmMediaImport.
-
-    Jellyfin's PlaybackInfo for Protocol=Http rebuilds streams from the remote
-    probe and drops local sidecar SRT. An external subtitle whose Path is itself
-    HTTP(S) is kept and exposed to GuamaFlix / Sodalite / Neptune.
-    """
-    if not client or not item_id or not jf_path or not sub_http_url:
-        return False
-    if not sub_http_url.startswith("http"):
-        return False
-    # Preserve existing A/V streams from the library item when possible.
-    streams: list[dict] = []
-    try:
-        item = client._get(  # noqa: SLF001
-            f"/Items/{item_id}",
-            params={"Fields": "MediaStreams,RunTimeTicks,Size"},
-        )
-    except Exception:
-        item = {}
-    if not isinstance(item, dict):
-        item = {}
-    for s in item.get("MediaStreams") or []:
-        if not isinstance(s, dict):
-            continue
-        typ = str(s.get("Type") or "")
-        if typ == "Subtitle":
-            continue
-        streams.append(
-            {
-                "Index": int(s.get("Index") or len(streams)),
-                "Type": typ,
-                "Codec": s.get("Codec") or "",
-                "Language": s.get("Language") or "",
-                "Channels": int(s.get("Channels") or 0),
-                "Width": int(s.get("Width") or 0),
-                "Height": int(s.get("Height") or 0),
-                "IsDefault": bool(s.get("IsDefault")),
-                "IsExternal": False,
-            }
-        )
-    lang = "ita" if language in {"it", "ita"} else language
-    streams.append(
-        {
-            "Index": len(streams),
-            "Type": "Subtitle",
-            "Codec": "srt",
-            "Language": lang,
-            "IsExternal": True,
-            "IsDefault": True,
-            "Path": sub_http_url,
-            "Title": "Italian",
-        }
-    )
-    ticks = int(item.get("RunTimeTicks") or 0)
-    dur = float(duration_sec or 0) or (ticks / 10_000_000.0 if ticks else 0.0)
-    sz = int(size or item.get("Size") or 0) or None
-    payload_item: dict = {
-        "Path": jf_path,
-        "Streams": streams,
-    }
-    if dur > 0:
-        payload_item["DurationSec"] = dur
-    if sz and sz > 1000:
-        payload_item["Size"] = sz
-    try:
-        client._post(  # noqa: SLF001
-            "/StrmMediaImport/Apply",
-            {"Items": [payload_item]},
-        )
-        return True
-    except Exception:
-        return False
-
-
 def _publish_http_sub_for_strm(
     client,
     *,
@@ -569,6 +596,8 @@ def _publish_http_sub_for_strm(
     language: str = "it",
     config: dict | None = None,
     log: LogFn | None = None,
+    verify_playback_info: bool = True,
+    user_id: str = "",
 ) -> bool:
     """Expose sidecar SRT as HTTP so PlaybackInfo keeps it for .strm Direct Play."""
     if not client or not item_id or not strm_path:
@@ -602,9 +631,18 @@ def _publish_http_sub_for_strm(
         jf_path=jf_path,
         sub_http_url=sub_url,
         language=language,
+        user_id=user_id,
+        config=config,
     )
     if not ok:
         return False
+    if not verify_playback_info or xtream_playback_blocks_extra_streams():
+        _log(
+            log,
+            f"Sottotitoli S{season:02d}E{episode:02d}: HTTP pubblicato "
+            f"(probe PlaybackInfo saltato)",
+        )
+        return True
     # StrmMediaImport may accept Apply without actually keeping HTTP subtitle Paths.
     # Verify PlaybackInfo; if still missing, clients like GuamaFlix/Sodalite cannot see them.
     try:
@@ -646,6 +684,8 @@ def ensure_italian_subs_for_strm(
     language: str = "it",
     log: LogFn | None = None,
     refresh_paths: bool = True,
+    verify_playback_info: bool = True,
+    user_id: str = "",
 ) -> dict:
     """Ensure Italian sidecar next to strm: forced if available, else full."""
     result = {
@@ -682,6 +722,8 @@ def ensure_italian_subs_for_strm(
                 language=language,
                 config=config,
                 log=log,
+                verify_playback_info=verify_playback_info,
+                user_id=user_id,
             )
         return result
     if has_any and prefer_forced:
@@ -741,6 +783,8 @@ def ensure_italian_subs_for_strm(
                             language=language,
                             config=cfg,
                             log=log,
+                            verify_playback_info=verify_playback_info,
+                            user_id=user_id,
                         )
                     return result
                 out = write_sidecar(strm_path, text, forced=bool(is_forced))
@@ -771,6 +815,8 @@ def ensure_italian_subs_for_strm(
                         language=language,
                         config=cfg,
                         log=log,
+                        verify_playback_info=verify_playback_info,
+                        user_id=user_id,
                     )
                 if refresh_paths and client is not None:
                     try:
@@ -820,6 +866,8 @@ def ensure_italian_subs_for_strm(
                         language=language,
                         config=cfg,
                         log=log,
+                        verify_playback_info=verify_playback_info,
+                        user_id=user_id,
                     )
                     return result
                 if ok and new_files:
@@ -873,6 +921,7 @@ def ensure_season_subtitles(
     prefer_forced: bool = True,
     language: str = "it",
     log: LogFn | None = None,
+    verify_playback_info: bool = True,
 ) -> dict:
     summary = {"ok": 0, "skipped": 0, "failed": 0, "episodes": []}
     try:
@@ -916,6 +965,8 @@ def ensure_season_subtitles(
             prefer_forced=prefer_forced,
             language=language,
             log=log,
+            verify_playback_info=verify_playback_info,
+            user_id=user_id,
         )
         summary["episodes"].append(info)
         if info.get("skipped"):
