@@ -321,6 +321,18 @@ def render_strm_sync_section(host: str, user: str, pw: str) -> None:
             value=saved.get("allow_4k", False),
             help=t("include_4k_strm_help"),
         )
+        convert_4k_only_after_sync = st.checkbox(
+            t("strm_convert_4k_only"),
+            value=saved.get("convert_4k_only_after_sync", False),
+            help=t("strm_convert_4k_only_help"),
+        )
+        convert_4k_only_limit = st.number_input(
+            t("strm_convert_4k_only_limit"),
+            min_value=0,
+            max_value=50,
+            value=int(saved.get("convert_4k_only_limit", 1) or 0),
+            help=t("strm_convert_4k_only_limit_help"),
+        )
         movies_output = st.text_input(
             t("strm_movies_output"),
             value=saved.get("movies_output", STRM_OUTPUT_MOVIES_PATH),
@@ -510,6 +522,8 @@ def render_strm_sync_section(host: str, user: str, pw: str) -> None:
         "cleanup_min_ratio": float(cleanup_min_ratio_percent) / 100.0,
         "refresh_emby": refresh_emby,
         "refresh_jellyfin": refresh_jellyfin,
+        "convert_4k_only_after_sync": convert_4k_only_after_sync,
+        "convert_4k_only_limit": int(convert_4k_only_limit),
         "use_tmdb": use_tmdb,
         "filter_tmdb_episodes": filter_tmdb_episodes,
         "tmdb_api_key": tmdb_api_key.strip(),

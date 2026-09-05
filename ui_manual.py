@@ -9,8 +9,11 @@ from core import (
     DOWNLOAD_MOVIES_PATH,
     build_episode_output,
     build_movie_output,
+    episode_num_value,
     exclude_hidden_items,
+    format_episode_choice,
     group_catalog_versions,
+    iter_season_episodes,
 )
 from i18n import t
 from ui_common import (
@@ -191,87 +194,135 @@ def render_manual_download_section(
                 )
                 if info and "episodes" in info:
                     seasons = sorted(info["episodes"].keys(), key=lambda s: int(s))
-                    season = st.selectbox(t("season"), seasons)
-
-                    episodes = info["episodes"][season]
-                    ep_search = st.text_input(
-                        t("search_episode"),
-                        placeholder=t("search_episode_ph"),
-                        key="ep_search",
-                    )
-                    ep_labels = [f"E{e['episode_num']} - {e['title']}" for e in episodes]
-                    if ep_search.strip():
-                        q = ep_search.strip().lower()
-                        ep_labels = [label for label in ep_labels if q in label.lower()]
-
-                    sel_ep = st.multiselect(t("episodes_to_download"), ep_labels)
-                    dest_options = [path for _key, path in SERIES_DEST_OPTIONS]
-                    dest_root = st.selectbox(
-                        t("destination"), dest_options, format_func=dest_label
+                    series_id = selected_s["series_id"]
+                    sel_seasons = st.multiselect(
+                        t("seasons"),
+                        seasons,
+                        key=f"manual_seasons_{series_id}",
+                        help=t("seasons_help"),
                     )
 
-                    if st.button(t("download_episodes"), key="download_episodes"):
-                        if not sel_ep:
-                            st.warning(t("select_one_episode"))
-                        else:
-                            items = []
-                            conflicts = []
-                            for name in sel_ep:
-                                ep_data = next(
-                                    e
-                                    for e in episodes
-                                    if f"E{e['episode_num']} - {e['title']}" == name
-                                )
-                                ext = ep_data.get("container_extension", "mp4")
-                                url = (
-                                    f"{host.rstrip('/')}/series/{user}/{pw}/"
-                                    f"{ep_data['id']}.{ext}"
-                                )
-                                path, output_file = build_episode_output(
-                                    s_name,
-                                    int(season),
-                                    int(ep_data["episode_num"]),
-                                    ext,
-                                    dest_root,
-                                )
-                                filename = os.path.basename(output_file)
-                                ep_title = f"{s_name} — {name}"
-                                item = {
-                                    "url": url,
-                                    "path": path,
-                                    "output_file": output_file,
-                                    "label": filename,
-                                }
-                                items.append(item)
-                                if os.path.exists(output_file):
-                                    conflicts.append(
-                                        {
-                                            "existing_path": output_file,
-                                            "new_path": output_file,
-                                            "new_title": ep_title,
-                                        }
-                                    )
+                    if not sel_seasons:
+                        st.info(t("select_one_season"))
+                    else:
+                        ordered_eps = iter_season_episodes(
+                            info["episodes"], sel_seasons
+                        )
+                        all_eps_key = f"manual_all_eps_{series_id}"
+                        if all_eps_key not in st.session_state:
+                            st.session_state[all_eps_key] = True
+                        select_all = st.checkbox(
+                            t("select_all_season_episodes"),
+                            key=all_eps_key,
+                        )
 
-                            if conflicts:
-                                st.session_state[PENDING_DOWNLOAD_KEY] = {
-                                    "kind": "episodes",
-                                    "scope_key": (
-                                        f"series_{selected_s['series_id']}_s{season}"
-                                    ),
-                                    "items": items,
-                                    "conflicts": conflicts,
-                                }
-                                st.rerun()
+                        chosen = ordered_eps
+                        if not select_all:
+                            ep_search = st.text_input(
+                                t("search_episode"),
+                                placeholder=t("search_episode_ph"),
+                                key=f"ep_search_{series_id}",
+                            )
+                            ep_labels = [
+                                format_episode_choice(season, ep)
+                                for season, ep in ordered_eps
+                            ]
+                            if ep_search.strip():
+                                q = ep_search.strip().lower()
+                                ep_labels = [
+                                    label
+                                    for label in ep_labels
+                                    if q in label.lower()
+                                ]
+                            sel_ep = st.multiselect(
+                                t("episodes_to_download"),
+                                ep_labels,
+                                key=f"manual_eps_{series_id}",
+                            )
+                            wanted = set(sel_ep)
+                            chosen = [
+                                pair
+                                for pair in ordered_eps
+                                if format_episode_choice(*pair) in wanted
+                            ]
+
+                        st.caption(
+                            t(
+                                "episodes_queued",
+                                count=len(chosen),
+                                n_seasons=len(sel_seasons),
+                            )
+                        )
+
+                        dest_options = [path for _key, path in SERIES_DEST_OPTIONS]
+                        dest_root = st.selectbox(
+                            t("destination"), dest_options, format_func=dest_label
+                        )
+
+                        if st.button(t("download_episodes"), key="download_episodes"):
+                            if not chosen:
+                                st.warning(t("select_one_episode"))
                             else:
-                                ok, total = download_episode_items(
-                                    items, skip_existing=False
-                                )
-                                if ok == total:
-                                    st.success(t("all_episodes_done"))
-                                elif ok > 0:
-                                    st.warning(
-                                        t("episodes_partial", ok=ok, total=total)
+                                items = []
+                                conflicts = []
+                                for season, ep_data in chosen:
+                                    ext = ep_data.get("container_extension", "mp4")
+                                    url = (
+                                        f"{host.rstrip('/')}/series/{user}/{pw}/"
+                                        f"{ep_data['id']}.{ext}"
                                     )
+                                    path, output_file = build_episode_output(
+                                        s_name,
+                                        int(season),
+                                        episode_num_value(ep_data),
+                                        ext,
+                                        dest_root,
+                                    )
+                                    filename = os.path.basename(output_file)
+                                    ep_title = (
+                                        f"{s_name} — "
+                                        f"{format_episode_choice(season, ep_data)}"
+                                    )
+                                    item = {
+                                        "url": url,
+                                        "path": path,
+                                        "output_file": output_file,
+                                        "label": filename,
+                                    }
+                                    items.append(item)
+                                    if os.path.exists(output_file):
+                                        conflicts.append(
+                                            {
+                                                "existing_path": output_file,
+                                                "new_path": output_file,
+                                                "new_title": ep_title,
+                                            }
+                                        )
+
+                                season_scope = "-".join(
+                                    str(s)
+                                    for s in sorted(sel_seasons, key=lambda s: int(s))
+                                )
+                                if conflicts:
+                                    st.session_state[PENDING_DOWNLOAD_KEY] = {
+                                        "kind": "episodes",
+                                        "scope_key": (
+                                            f"series_{series_id}_s{season_scope}"
+                                        ),
+                                        "items": items,
+                                        "conflicts": conflicts,
+                                    }
+                                    st.rerun()
+                                else:
+                                    ok, total = download_episode_items(
+                                        items, skip_existing=False
+                                    )
+                                    if ok == total:
+                                        st.success(t("all_episodes_done"))
+                                    elif ok > 0:
+                                        st.warning(
+                                            t("episodes_partial", ok=ok, total=total)
+                                        )
 
     st.divider()
     render_download_history_section()

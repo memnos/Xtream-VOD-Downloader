@@ -238,20 +238,22 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         ),
         "auto_intro_skip_enabled": "Auto intro skip for series you start watching",
         "auto_intro_skip_help": (
-            "On episode play, ensure Intro MediaSegments for that season (from the episode onward). "
-            "If needed, downloads a hidden sample, analyzes it, writes the segment to Jellyfin, "
-            "and keeps playback on .strm via proxy."
+            "After you start an episode, download the opening of all later episodes "
+            "(including later seasons) into a hidden cache outside Jellyfin libraries. "
+            "Compares their audio (Intro Skipper-style) and writes Intro MediaSegments "
+            "so GuamaFlix/Jellyfin can show Skip. Playback stays on .strm via proxy."
         ),
         "auto_intro_skip_download": "Download hidden media when no local file exists",
         "auto_intro_skip_download_help": (
-            "Prefers analyzing the remote stream directly (no disk). "
-            "If that fails, downloads a hidden sample. "
+            "Downloads the first ~7 minutes of remaining episodes to "
+            "`.data/intro-cache` (not in the TV library). "
+            "Uses those samples to fingerprint the shared theme, then writes Skip timestamps. "
             "With «keep until watched», downloads a full hidden .proxysource instead. "
             "Never replaces the .strm in Jellyfin."
         ),
         "auto_intro_skip_keep_until_watched": "Keep hidden locals until the series is fully watched",
         "auto_intro_skip_keep_until_watched_help": (
-            "Off (default): delete the hidden file as soon as the Intro segment is saved. "
+            "Off (default): delete intro-cache samples once every remaining episode has Skip. "
             "On: keep .proxysource files for proxy/local use, then delete when every episode is played."
         ),
         "auto_subs_enabled": "Auto-download Italian subtitles",
@@ -345,6 +347,16 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "destination": "Destination",
         "download_movie": "🚀 Download movie",
         "season": "Season",
+        "seasons": "Seasons",
+        "seasons_help": (
+            "Select one or more seasons. Episodes are downloaded in order "
+            "(season, then episode number)."
+        ),
+        "select_one_season": "Select at least one season.",
+        "select_all_season_episodes": "All episodes of the selected seasons",
+        "episodes_queued": (
+            "{count} episodes from {n_seasons} season(s), to be downloaded in order."
+        ),
         "search_episode": "🔍 Search episode",
         "search_episode_ph": "e.g. pilot, E01, episode title...",
         "episodes_to_download": "Episodes to download",
@@ -442,6 +454,20 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "strm_adult_terms": "Adult terms (one per line)",
         "strm_adult_terms_help": "Used when 'Skip adult content' is on. Edit to taste.",
         "strm_refresh_section": "After sync",
+        "strm_convert_4k_only": "Download 4K-only movies and convert to 1080p",
+        "strm_convert_4k_only_help": (
+            "After STRM sync, download movies that exist only in 4K (no 1080p/HD alternate), "
+            "highest TMDB rating first, then convert them to H.264 1080p SDR + AAC stereo MP4 "
+            "(same profile as the One Mile test — compatible with GuamaFlix, Sodalite, and "
+            "the web player). If a non-4K version appears later, the converted file is removed "
+            "and the non-4K .strm is restored. Library refresh (below) runs after this job."
+        ),
+        "strm_convert_4k_only_limit": "Max 4K-only movies per sync",
+        "strm_convert_4k_only_limit_help": (
+            "How many 4K-only titles to download+convert after each STRM sync, "
+            "starting from the highest TMDB rating. "
+            "Keep this low (1–2) so overnight work finishes before daytime use. 0 = none."
+        ),
         "strm_refresh_emby": "Refresh Emby library",
         "strm_refresh_jellyfin": "Refresh Jellyfin library",
         "strm_refresh_disabled_hint": (
@@ -899,20 +925,22 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         ),
         "auto_intro_skip_enabled": "Intro skip automatico per le serie che inizi a guardare",
         "auto_intro_skip_help": (
-            "Alla riproduzione di un episodio, crea i MediaSegments Intro per la stagione "
-            "(da quell'episodio in poi). Se serve, scarica un campione nascosto, analizza, "
-            "scrive il segmento su Jellyfin e lascia la visione sugli .strm via proxy."
+            "Dopo un episodio, scarica l'inizio di tutti quelli successivi "
+            "(anche delle stagioni dopo) in una cache nascosta fuori dalle librerie Jellyfin. "
+            "Confronta l'audio (come Intro Skipper), scrive i MediaSegments Intro "
+            "e GuamaFlix/Jellyfin mostrano Skip. La visione resta sugli .strm via proxy."
         ),
         "auto_intro_skip_download": "Scarica media nascosti se non c'è file locale",
         "auto_intro_skip_download_help": (
-            "Di preferenza analizza lo stream remoto (senza disco). "
-            "Se fallisce, scarica un campione nascosto. "
+            "Scarica i primi ~7 minuti degli episodi rimanenti in "
+            "`.data/intro-cache` (non nella libreria TV). "
+            "Con quei sample riconosce la sigla e scrive i timestamp dello Skip. "
             "Con «tieni fino a serie vista» scarica un .proxysource completo. "
             "Non sostituisce lo .strm in Jellyfin."
         ),
         "auto_intro_skip_keep_until_watched": "Tieni i locali nascosti finché non hai visto tutta la serie",
         "auto_intro_skip_keep_until_watched_help": (
-            "Spento (default): cancella il file nascosto appena l'Intro è salvata. "
+            "Spento (default): cancella i sample in intro-cache quando tutti gli episodi rimanenti hanno Skip. "
             "Acceso: tiene i .proxysource, poi li cancella quando tutti gli episodi risultano visti."
         ),
         "auto_subs_enabled": "Download automatico sottotitoli italiani",
@@ -1007,6 +1035,16 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "destination": "Destinazione",
         "download_movie": "🚀 Scarica Film",
         "season": "Stagione",
+        "seasons": "Stagioni",
+        "seasons_help": (
+            "Seleziona una o più stagioni. Gli episodi verranno scaricati in ordine "
+            "(stagione, poi numero episodio)."
+        ),
+        "select_one_season": "Seleziona almeno una stagione.",
+        "select_all_season_episodes": "Tutti gli episodi delle stagioni selezionate",
+        "episodes_queued": (
+            "{count} episodi da {n_seasons} stagioni, verranno scaricati in ordine."
+        ),
         "search_episode": "🔍 Cerca episodio",
         "search_episode_ph": "Es. pilota, E01, titolo episodio...",
         "episodes_to_download": "Episodi da scaricare",
@@ -1105,6 +1143,21 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "strm_adult_terms": "Termini per adulti (uno per riga)",
         "strm_adult_terms_help": "Usati quando 'Escludi contenuti per adulti' è attivo. Modificabili.",
         "strm_refresh_section": "Dopo la sync",
+        "strm_convert_4k_only": "Scarica i film solo-4K e convertili in 1080p",
+        "strm_convert_4k_only_help": (
+            "Dopo la sync STRM, scarica i film che esistono solo in 4K (nessuna versione "
+            "1080p/HD), dal voto TMDB più alto, e li converte in MP4 H.264 1080p SDR + AAC "
+            "stereo (stesso formato del test di One Mile, compatibile con GuamaFlix, Sodalite "
+            "e la Web UI). Se in seguito compare una versione non-4K, il file convertito viene "
+            "rimosso e viene ripristinato lo .strm non-4K. L'aggiornamento libreria (sotto) "
+            "parte dopo questo lavoro."
+        ),
+        "strm_convert_4k_only_limit": "Film solo-4K massimi per sync",
+        "strm_convert_4k_only_limit_help": (
+            "Quanti titoli solo-4K scaricare e convertire dopo ogni sync STRM, "
+            "partendo dal voto TMDB più alto. "
+            "Tienilo basso (1–2) così il lavoro notturno finisce prima dell'uso diurno. 0 = nessuno."
+        ),
         "strm_refresh_emby": "Aggiorna libreria Emby",
         "strm_refresh_jellyfin": "Aggiorna libreria Jellyfin",
         "strm_refresh_disabled_hint": (

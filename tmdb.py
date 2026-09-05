@@ -268,6 +268,8 @@ class TmdbClient:
                     "original_title": result.get("original_title") or "",
                     "year": self._year_from(result.get("release_date")),
                     "adult": bool(result.get("adult")),
+                    "vote_average": float(result.get("vote_average") or 0),
+                    "vote_count": int(result.get("vote_count") or 0),
                 }
             )
             if len(out) >= max(1, int(max_results)):
@@ -305,6 +307,8 @@ class TmdbClient:
             "title": result.get("title") or cleaned,
             "year": result.get("year"),
             "adult": bool(result.get("adult")),
+            "vote_average": float(result.get("vote_average") or 0),
+            "vote_count": int(result.get("vote_count") or 0),
         }
         self._store(key, entry)
         return entry
@@ -457,6 +461,47 @@ class TmdbClient:
             },
         )
         return runtime
+
+    def get_movie_vote(self, tmdb_id: int | str | None) -> tuple[float, int] | None:
+        """Return (vote_average, vote_count) from TMDB, cached. None if unavailable."""
+        try:
+            tid = int(tmdb_id)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        if tid <= 0:
+            return None
+        key = f"movie_vote:{tid}"
+        cached = self._cached(key)
+        if cached is not None:
+            if not cached.get("matched"):
+                return None
+            try:
+                average = float(cached.get("vote_average") or 0)
+                count = int(cached.get("vote_count") or 0)
+            except (TypeError, ValueError):
+                return None
+            return average, count
+
+        self.lookups += 1
+        payload = self._get(f"/movie/{tid}", {})
+        if payload is None:
+            return None
+        try:
+            average = float(payload.get("vote_average") or 0)
+            count = int(payload.get("vote_count") or 0)
+        except (TypeError, ValueError):
+            return None
+        self._store(
+            key,
+            {
+                "matched": True,
+                "tmdb_id": tid,
+                "vote_average": average,
+                "vote_count": count,
+                "title": payload.get("title") or payload.get("original_title") or "",
+            },
+        )
+        return average, count
 
     # TMDB TV statuses that mean no further episodes are expected.
     TV_ENDED_STATUSES = frozenset({"Ended", "Canceled", "Cancelled"})

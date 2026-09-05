@@ -30,7 +30,7 @@ from ui_duration import render_strm_duration_audit_section
 from ui_manual import render_manual_download_section
 from ui_strm import render_strm_sync_section
 
-APP_VERSION = "2.31.0"
+APP_VERSION = "2.32.0"
 
 SECTION_BY_MODE = {
     "manual": "download",

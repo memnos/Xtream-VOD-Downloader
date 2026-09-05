@@ -2789,6 +2789,8 @@ def default_strm_sync_config() -> dict:
         "cleanup_min_ratio": 0.5,
         "refresh_emby": False,
         "refresh_jellyfin": False,
+        "convert_4k_only_after_sync": False,
+        "convert_4k_only_limit": 1,
         "use_tmdb": False,
         "filter_tmdb_episodes": True,
         "tmdb_api_key": os.environ.get("TMDB_API_KEY", ""),
@@ -2819,6 +2821,7 @@ def load_strm_sync_config() -> dict:
     for key in (
         "refresh_emby",
         "refresh_jellyfin",
+        "convert_4k_only_after_sync",
         "use_tmdb",
         "filter_tmdb_episodes",
         "exclude_adult",
@@ -2852,6 +2855,10 @@ def load_strm_sync_config() -> dict:
         merged["cleanup_min_ratio"] = max(0.05, min(1.0, float(merged.get("cleanup_min_ratio", 0.5))))
     except (TypeError, ValueError):
         merged["cleanup_min_ratio"] = 0.5
+    try:
+        merged["convert_4k_only_limit"] = max(0, min(50, int(merged.get("convert_4k_only_limit", 1))))
+    except (TypeError, ValueError):
+        merged["convert_4k_only_limit"] = 1
     mode = str(merged.get("schedule_mode") or "interval")
     merged["schedule_mode"] = mode if mode in {"interval", "daily"} else "interval"
     try:
@@ -2912,6 +2919,9 @@ def default_strm_sync_status() -> dict:
         "total_elapsed_sec": 0.0,
         "heartbeat_unix": 0.0,
         "heartbeat_at": "",
+        "convert_4k_converted": 0,
+        "convert_4k_failed": 0,
+        "convert_4k_skipped": 0,
         "log": [],
     }
 
@@ -3250,6 +3260,33 @@ def find_xtream_episode(
     return None
 
 
+def episode_num_value(ep: dict) -> int:
+    try:
+        return int(ep.get("episode_num") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def format_episode_choice(season: str, ep: dict) -> str:
+    return f"S{int(season):02d}E{episode_num_value(ep):02d} - {ep.get('title') or ''}"
+
+
+def iter_season_episodes(episodes_map: dict, seasons: list[str]) -> list[tuple[str, dict]]:
+    """Episodes of the selected seasons, ordered by season then episode number."""
+    selected = sorted(seasons, key=lambda s: int(s))
+    ordered: list[tuple[str, dict]] = []
+    for season in selected:
+        eps = episodes_map.get(season) or []
+        if not isinstance(eps, list):
+            continue
+        for ep in sorted(
+            (e for e in eps if isinstance(e, dict)),
+            key=episode_num_value,
+        ):
+            ordered.append((season, ep))
+    return ordered
+
+
 def build_episode_output(
     series_name: str,
     season: int,
@@ -3462,6 +3499,19 @@ def evaluate_prefetch_switch(
     )
 
 
+def download_already_complete(output: str, output_path: str) -> bool:
+    """True when resume failed with HTTP 416 because the local file already has all bytes."""
+    if not output_path or not os.path.isfile(output_path):
+        return False
+    try:
+        if os.path.getsize(output_path) <= 0:
+            return False
+    except OSError:
+        return False
+    blob = (output or "").lower()
+    return "http error 416" in blob or "requested range not satisfiable" in blob
+
+
 def run_ytdlp(
     url: str,
     output_path: str,
@@ -3522,7 +3572,11 @@ def run_ytdlp(
     try:
         proc.wait()
         if proc.returncode != 0:
-            raise RuntimeError("\n".join(output_lines[-15:]) or "Download fallito")
+            joined = "\n".join(output_lines[-20:]) or "Download fallito"
+            if download_already_complete(joined, output_path):
+                pass
+            else:
+                raise RuntimeError(joined)
     finally:
         if output_path and os.path.exists(output_path):
             finalize_download_path(output_path)

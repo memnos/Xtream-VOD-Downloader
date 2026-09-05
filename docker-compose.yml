@@ -6,6 +6,7 @@ services:
     # On plain Docker Desktop you may switch to bridge mode and publish port 8501 instead.
     network_mode: host
     volumes:
+      - .:/app
       - ./.data:/app/.data
       - ${MOVIES_PATH:-./downloads/movies}:/download/movies
       - ${TV_PATH:-./downloads/tv}:/download/tv

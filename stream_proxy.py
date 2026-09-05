@@ -46,6 +46,173 @@ _REGISTRY_LOCK = threading.RLock()
 _REGISTRY_CACHE: dict | None = None
 _REGISTRY_DIRTY = 0
 _REGISTRY_FLUSH_EVERY = 250
+# Provider allows one Xtream connection. A second *title* must not steal the
+# stream already playing. Same episode may use 2 slots (play + MP4 moov/index).
+# Skip intro/recap preempts those GETs. A different title is always denied.
+_XTREAM_SLOT_LOCK = threading.Lock()
+_XTREAM_HOLDER: str | None = None
+_XTREAM_NEXT_GEN = 0
+_XTREAM_LIVE_GENS: set[int] = set()
+_XTREAM_ABORT = threading.Event()
+_XTREAM_IDLE = threading.Event()
+_XTREAM_IDLE.set()
+_XTREAM_SLOT_COUNTS: dict[str, int] = {}
+XTREAM_SAME_KEY_SLOTS = 2
+# Last N bytes of an MP4 are treated as index/moov, not Skip.
+_INDEX_TAIL_BYTES = 8 * 1024 * 1024
+
+
+def xtream_passthrough_begin(key: str, *, preempt_same: bool = True) -> str | None:
+    """Take an Xtream slot, or return the key that already holds it."""
+    mode = "preempt" if preempt_same else "share"
+    _blocker, _gen = xtream_passthrough_acquire(key, mode=mode)
+    return _blocker
+
+
+def _passthrough_should_preempt(
+    start: int | None,
+    *,
+    total_size: int = 0,
+) -> bool:
+    """True only for a mid-file Skip seek — not start, EOF, or moov tail."""
+    if start is None or int(start) <= 0:
+        return False
+    total = int(total_size or 0)
+    if total > 0 and int(start) >= total:
+        return False
+    if _passthrough_is_index_range(start, total):
+        return False
+    return True
+
+
+def _passthrough_is_index_range(start: int | None, total_size: int) -> bool:
+    if start is None:
+        return False
+    total = int(total_size or 0)
+    pos = int(start)
+    if total <= 0 or pos <= 0 or pos >= total:
+        return False
+    return pos >= max(0, total - _INDEX_TAIL_BYTES)
+
+
+def _range_is_past_eof(start: int | None, total_size: int) -> bool:
+    total = int(total_size or 0)
+    return start is not None and total > 0 and int(start) >= total
+
+
+def _passthrough_slot_mode(
+    start: int | None,
+    *,
+    total_size: int = 0,
+    is_probe: bool = False,
+    head_only: bool = False,
+) -> str:
+    if head_only or is_probe:
+        return "share"
+    if _passthrough_should_preempt(start, total_size=total_size):
+        return "preempt"
+    if _passthrough_is_index_range(start, int(total_size or 0)):
+        return "share"
+    return "primary"
+
+
+def _xtream_take_slot(token: str) -> int:
+    global _XTREAM_HOLDER, _XTREAM_NEXT_GEN
+    _XTREAM_NEXT_GEN += 1
+    gen = _XTREAM_NEXT_GEN
+    _XTREAM_LIVE_GENS.add(gen)
+    _XTREAM_HOLDER = token
+    _XTREAM_SLOT_COUNTS[token] = _XTREAM_SLOT_COUNTS.get(token, 0) + 1
+    _XTREAM_ABORT.clear()
+    _XTREAM_IDLE.clear()
+    return gen
+
+
+def xtream_passthrough_acquire(
+    key: str,
+    *,
+    preempt_same: bool = True,
+    mode: str | None = None,
+) -> tuple[str | None, int]:
+    """Return (blocker_or_None, generation). generation is 0 if blocked.
+
+    mode: primary (play start), share (index/probe, up to 2), preempt (Skip).
+    """
+    token = str(key or "").strip()
+    if not token:
+        return None, 0
+    slot_mode = (mode or ("preempt" if preempt_same else "share")).strip() or "share"
+    while True:
+        wait_idle = False
+        with _XTREAM_SLOT_LOCK:
+            holder = _XTREAM_HOLDER
+            count = int(_XTREAM_SLOT_COUNTS.get(token, 0) if holder == token else 0)
+            if holder is None:
+                return None, _xtream_take_slot(token)
+            if holder != token:
+                return holder, 0
+            if slot_mode == "share" and count < XTREAM_SAME_KEY_SLOTS:
+                return None, _xtream_take_slot(token)
+            if slot_mode == "primary":
+                # Duplicate bytes=0- must not consume the index slot.
+                return holder, 0
+            if slot_mode != "preempt":
+                return holder, 0
+            _XTREAM_ABORT.set()
+            wait_idle = True
+        if wait_idle:
+            _XTREAM_IDLE.wait(timeout=4.0)
+            with _XTREAM_SLOT_LOCK:
+                holder = _XTREAM_HOLDER
+                if holder is None:
+                    return None, _xtream_take_slot(token)
+                if holder != token:
+                    return holder, 0
+                _XTREAM_LIVE_GENS.clear()
+                _XTREAM_SLOT_COUNTS.clear()
+                return None, _xtream_take_slot(token)
+        return holder, 0
+
+
+def xtream_passthrough_aborted(gen: int) -> bool:
+    with _XTREAM_SLOT_LOCK:
+        return _XTREAM_ABORT.is_set() or int(gen or 0) not in _XTREAM_LIVE_GENS
+
+
+def xtream_passthrough_end(key: str, gen: int | None = None) -> None:
+    token = str(key or "").strip()
+    if not token:
+        return
+    global _XTREAM_HOLDER
+    with _XTREAM_SLOT_LOCK:
+        if _XTREAM_HOLDER != token:
+            return
+        if gen is not None:
+            gid = int(gen)
+            if gid not in _XTREAM_LIVE_GENS:
+                return
+            _XTREAM_LIVE_GENS.discard(gid)
+        left = int(_XTREAM_SLOT_COUNTS.get(token, 1)) - 1
+        if left <= 0:
+            _XTREAM_HOLDER = None
+            _XTREAM_SLOT_COUNTS.clear()
+            _XTREAM_LIVE_GENS.clear()
+            _XTREAM_ABORT.clear()
+            _XTREAM_IDLE.set()
+        else:
+            _XTREAM_SLOT_COUNTS[token] = left
+
+
+def xtream_passthrough_reset() -> None:
+    """Tests only."""
+    global _XTREAM_HOLDER, _XTREAM_NEXT_GEN
+    with _XTREAM_SLOT_LOCK:
+        _XTREAM_HOLDER = None
+        _XTREAM_NEXT_GEN = 0
+        _XTREAM_LIVE_GENS.clear()
+        _XTREAM_SLOT_COUNTS.clear()
+        _XTREAM_ABORT.clear()
+        _XTREAM_IDLE.set()
 
 
 def movie_proxy_key(folder_name: str) -> str:
@@ -751,6 +918,35 @@ def _content_type_for_ext(ext: str) -> str:
     return "video/x-matroska"
 
 
+# Closed Range larger than this is remux/play (≈2MB ≈ a few seconds of video).
+_PROBE_CLOSED_MAX = 256 * 1024
+
+
+def _passthrough_is_probe(
+    user_agent: str,
+    start: int | None,
+    end: int | None,
+    *,
+    head_only: bool = False,
+) -> bool:
+    """True for a sniff — not remux/play/Skip.
+
+    Jellyfin remux reads the .strm with ffmpeg/Lavf. Open-ended Range (bytes=N-)
+    and ~2MB closed chunks are playback; capping those froze GuamaFlix at 2–3s.
+    Only HEAD, ffprobe, or a tiny closed Range (header sniff) are probes.
+    """
+    if head_only:
+        return True
+    ua = (user_agent or "").lower()
+    if "ffprobe" in ua:
+        return True
+    if start is not None and end is not None:
+        span = end - start + 1
+        if 0 < span <= _PROBE_CLOSED_MAX:
+            return True
+    return False
+
+
 def _needs_remote_passthrough(ext: str, job: "ProxyJob") -> bool:
     """Incomplete MP4/MOV often lacks moov until the end — unplayable from a growing file."""
     if (ext or "").lower().lstrip(".") not in ("mp4", "m4v", "mov"):
@@ -770,6 +966,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:
         print(f"[stream_proxy] {self.address_string()} - {fmt % args}", flush=True)
 
+    def _send_range_not_satisfiable(self, total: int) -> None:
+        self.send_response(416)
+        if int(total or 0) > 0:
+            self.send_header("Content-Range", f"bytes */{int(total)}")
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
     def do_HEAD(self) -> None:  # noqa: N802
         self._handle(head_only=True)
 
@@ -786,10 +990,78 @@ class ProxyHandler(BaseHTTPRequestHandler):
         head_only: bool,
     ) -> None:
         """Serve Range from Xtream while the local download catches up (MP4-safe)."""
+        ua = self.headers.get("User-Agent") or ""
+        is_probe = _passthrough_is_probe(
+            ua, start, end, head_only=head_only
+        )
+        rng = self.headers.get("Range") or "-"
+        slot_mode_preview = _passthrough_slot_mode(
+            start,
+            total_size=int(job.total_size or 0),
+            is_probe=is_probe,
+            head_only=head_only,
+        )
+        print(
+            f"[stream_proxy] begin {'HEAD' if head_only else 'GET'} "
+            f"key={job.key[:12]} probe={int(is_probe)} mode={slot_mode_preview} "
+            f"range={rng} ua={(ua[:48] or '-')}",
+            flush=True,
+        )
+        if _range_is_past_eof(start, int(job.total_size or 0)):
+            print(
+                f"[stream_proxy] 416 past eof key={job.key[:12]} "
+                f"start={start} total={job.total_size}",
+                flush=True,
+            )
+            self._send_range_not_satisfiable(int(job.total_size or 0))
+            return
+        slot_mode = _passthrough_slot_mode(
+            start,
+            total_size=int(job.total_size or 0),
+            is_probe=is_probe,
+            head_only=head_only,
+        )
+        blocker, gen = xtream_passthrough_acquire(job.key, mode=slot_mode)
+        if blocker:
+            print(
+                f"[stream_proxy] xtream busy holder={blocker[:12]} denied={job.key[:12]}"
+                f" mode={slot_mode}{' probe' if is_probe else ''}",
+                flush=True,
+            )
+            self.send_error(503, "xtream busy")
+            return
+        try:
+            self._passthrough_remote_unlocked(
+                job,
+                entry,
+                start=start,
+                end=end,
+                head_only=head_only,
+                is_probe=is_probe,
+                slot_gen=gen,
+            )
+        finally:
+            xtream_passthrough_end(job.key, gen)
+
+    def _passthrough_remote_unlocked(
+        self,
+        job: ProxyJob,
+        entry: dict,
+        *,
+        start: int | None,
+        end: int | None,
+        head_only: bool,
+        is_probe: bool = False,
+        slot_gen: int = 0,
+    ) -> None:
         headers = {
             "User-Agent": "Xtream-VOD-Downloader/proxy-passthrough",
             "Accept-Encoding": "identity",
         }
+        # HEAD must not open a full Xtream body — that burns the 1 connection
+        # and the following play GET dies after a couple of seconds.
+        if head_only:
+            start, end = 0, 0
         if start is not None:
             if end is not None:
                 headers["Range"] = f"bytes={start}-{end}"
@@ -807,6 +1079,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.send_error(502, f"remote fetch failed: {exc}"[:200])
             return
         try:
+            if resp.status_code == 416:
+                total = int(job.total_size or 0)
+                cr = resp.headers.get("Content-Range") or ""
+                if "/" in cr:
+                    try:
+                        total = int(cr.rsplit("/", 1)[-1])
+                        job.total_size = total
+                    except ValueError:
+                        pass
+                self._send_range_not_satisfiable(total)
+                return
             if resp.status_code not in (200, 206):
                 self.send_error(502, f"remote status {resp.status_code}")
                 return
@@ -836,21 +1119,33 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.end_headers()
             if head_only:
                 return
+            sent = 0
+            probe_cap = 2 * 1024 * 1024 if is_probe else 0
             try:
                 for chunk in resp.iter_content(chunk_size=256 * 1024):
+                    if slot_gen and xtream_passthrough_aborted(slot_gen):
+                        break
                     if not chunk:
                         continue
                     try:
                         self.wfile.write(chunk)
                     except (BrokenPipeError, ConnectionResetError):
                         break
+                    if probe_cap:
+                        sent += len(chunk)
+                        if sent >= probe_cap:
+                            break
             except (
                 requests.exceptions.ChunkedEncodingError,
                 requests.exceptions.ConnectionError,
                 requests.exceptions.Timeout,
             ) as exc:
                 # Provider closed the socket (often a second Xtream connection).
-                print(f"[stream_proxy] upstream closed during passthrough: {exc}", flush=True)
+                print(
+                    f"[stream_proxy] upstream closed during passthrough "
+                    f"key={job.key[:12]}: {exc}",
+                    flush=True,
+                )
         finally:
             resp.close()
 

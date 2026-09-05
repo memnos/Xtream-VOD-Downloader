@@ -99,7 +99,7 @@ class PlayingItem:
 
 PlayingEpisode = PlayingItem
 
-DEFER_XTREAM_ASSIST_IDLE_SEC = 120
+DEFER_XTREAM_ASSIST_IDLE_SEC = 25
 
 
 @dataclass
@@ -692,6 +692,14 @@ class AutoDownloadWatcher:
             if config.get("auto_subs_enabled"):
                 features.append("subs")
             self._log(f"Watcher avviato ({', '.join(features) or 'idle'})")
+            try:
+                from intro_skip import load_intro_season_backfills
+
+                if load_intro_season_backfills():
+                    self._xtream_assist_idle_after = time.time() + 15
+                    self._log("Intro skip: backfill stagione in coda (idle 15s)")
+            except Exception:
+                pass
 
     def _run_loop(self) -> None:
         while not self._stop_event.is_set():
@@ -995,9 +1003,9 @@ class AutoDownloadWatcher:
             return
         season = int(playing.season)
         episode = int(playing.episode)
-        # Debounce per series+season (+ feature flags) so we don't re-fire every poll.
+        # Per-episode so later episodes still get intro after the first of the season.
         assist_key = (
-            f"{playing.server_id}:{playing.series_id}:S{season:02d}:"
+            f"{playing.server_id}:{playing.item_id}:"
             f"intro={int(bool(config.get('auto_intro_skip_enabled')))}:"
             f"subs={int(bool(config.get('auto_subs_enabled')))}"
         )
@@ -1032,6 +1040,20 @@ class AutoDownloadWatcher:
         if defer_xtream:
             self._deferred_xtream_assist = payload
             self._xtream_assist_idle_after = 0.0
+            if series_folder and playing.series_id and config.get("auto_intro_skip_enabled"):
+                try:
+                    from intro_skip import save_intro_season_backfill
+
+                    save_intro_season_backfill(
+                        series_id=playing.series_id,
+                        series_folder=series_folder,
+                        from_season=season,
+                        from_episode=episode,
+                        user_id=session.user_id,
+                        server=playing.server_id or session.server_id or "jellyfin",
+                    )
+                except Exception:
+                    pass
 
         def _job() -> None:
             self._run_playback_assist_job(payload, xtream_ok=not defer_xtream)
@@ -1068,7 +1090,7 @@ class AutoDownloadWatcher:
             f"{'' if xtream_ok else ', xtream=defer'})"
         )
 
-        if config.get("auto_intro_skip_enabled") and series_folder:
+        if config.get("auto_intro_skip_enabled") and series_folder and not xtream_ok:
             try:
                 from intro_skip import ensure_intro_for_episode
 
@@ -1082,7 +1104,9 @@ class AutoDownloadWatcher:
                     series_id=series_id,
                     config=config,
                     log=self._log,
-                    allow_xtream=xtream_ok,
+                    allow_xtream=False,
+                    prefer_sample=True,
+                    keep_sample=True,
                 )
                 self._log(
                     f"Intro skip S{season:02d}E{episode:02d}: "
@@ -1120,56 +1144,130 @@ class AutoDownloadWatcher:
 
         if not xtream_ok:
             self._log(
-                "Intro resto stagione differito: riproduzione strm "
+                "Intro resto serie differito: riproduzione strm "
                 "(il provider permette 1 sola connessione)"
             )
             return
 
         if config.get("auto_intro_skip_enabled") and series_folder:
             try:
-                from intro_skip import ensure_season_intros
+                from intro_skip import (
+                    ensure_remaining_series_intros,
+                )
 
-                summary = ensure_season_intros(
+                summary = ensure_remaining_series_intros(
                     client,
                     user_id=user_id,
                     series_id=series_id,
-                    season=season,
                     series_folder=series_folder,
+                    from_season=season,
+                    from_episode=episode,
                     config=config,
                     log=self._log,
-                    from_episode=episode + 1,
                     server=server,
                     allow_xtream=True,
+                    include_current=True,
                 )
                 self._log(
-                    f"Intro skip S{season:02d} resto: ok={summary.get('ok')} "
-                    f"skip={summary.get('skipped')} fail={summary.get('failed')} "
-                    f"dl={summary.get('downloaded')} cleaned={summary.get('cleaned')}"
+                    f"Intro skip serie da S{season:02d}E{episode:02d}: "
+                    f"ok={summary.get('ok')} skip={summary.get('skipped')} "
+                    f"fail={summary.get('failed')} dl={summary.get('downloaded')} "
+                    f"clone={summary.get('cloned')} "
+                    f"targets={summary.get('targets')}"
+                    f"{' deferred=' + str(summary.get('next') or '') if summary.get('deferred') else ''}"
                 )
             except Exception as exc:
-                self._log(f"Intro skip resto stagione: {exc}")
+                self._log(f"Intro skip resto serie: {exc}")
 
     def _maybe_run_deferred_xtream_assist(self) -> None:
-        payload = self._deferred_xtream_assist
         after = self._xtream_assist_idle_after
-        if not payload or after <= 0 or time.time() < after:
-            return
+        payload = self._deferred_xtream_assist
         if self._watching_item is not None:
             return
-        self._deferred_xtream_assist = None
-        self._xtream_assist_idle_after = 0.0
-        assist_key = str(payload.get("assist_key") or "deferred")
-        self._log("Assist Xtream ripreso dopo idle (intro + probe sottotitoli)")
+        from core import xtream_playback_blocks_extra_streams
 
-        def _job() -> None:
-            self._run_playback_assist_job(payload, xtream_ok=True)
+        if xtream_playback_blocks_extra_streams():
+            return
+        from intro_skip import load_intro_season_backfills, schedule_intro_job
 
-        try:
-            from intro_skip import schedule_intro_job
+        pending_backfill = load_intro_season_backfills()
+        if payload and after > 0 and time.time() >= after:
+            self._deferred_xtream_assist = None
+            self._xtream_assist_idle_after = 0.0
+            assist_key = str(payload.get("assist_key") or "deferred")
+            self._log("Assist Xtream ripreso dopo idle (intro + probe sottotitoli)")
 
-            schedule_intro_job(f"assist-deferred:{assist_key}", _job)
-        except Exception:
-            threading.Thread(target=_job, daemon=True, name="playback-assist-deferred").start()
+            def _job() -> None:
+                self._run_playback_assist_job(payload, xtream_ok=True)
+
+            try:
+                schedule_intro_job(f"assist-deferred:{assist_key}", _job)
+            except Exception:
+                threading.Thread(
+                    target=_job, daemon=True, name="playback-assist-deferred"
+                ).start()
+            return
+        if pending_backfill and after > 0 and time.time() >= after:
+            self._xtream_assist_idle_after = 0.0
+            self._log("Intro skip: backfill stagione da coda persistente")
+
+            def _backfill() -> None:
+                self._run_intro_season_backfills()
+
+            try:
+                schedule_intro_job("intro-season-backfill", _backfill)
+            except Exception:
+                threading.Thread(
+                    target=_backfill, daemon=True, name="intro-backfill"
+                ).start()
+
+    def _run_intro_season_backfills(self) -> None:
+        from intro_skip import (
+            ensure_remaining_series_intros,
+            load_intro_season_backfills,
+        )
+        from strm_seasons import _build_jellyfin_client
+
+        config = load_auto_download_config()
+        client, uid = _build_jellyfin_client(config)
+        if not client:
+            return
+        for row in load_intro_season_backfills():
+            series_id = str(row.get("series_id") or "")
+            folder = str(row.get("series_folder") or "")
+            try:
+                from_season = int(row.get("from_season") or row.get("season") or 0)
+                from_episode = int(row.get("from_episode") or 1)
+            except (TypeError, ValueError):
+                continue
+            if not series_id or not folder or from_season < 1:
+                continue
+            user_id = str(row.get("user_id") or uid or "")
+            server = str(row.get("server") or "jellyfin")
+            try:
+                summary = ensure_remaining_series_intros(
+                    client,
+                    user_id=user_id,
+                    series_id=series_id,
+                    series_folder=folder,
+                    from_season=from_season,
+                    from_episode=from_episode,
+                    config=config,
+                    log=self._log,
+                    server=server,
+                    allow_xtream=True,
+                    include_current=True,
+                )
+                self._log(
+                    f"Intro skip backfill da S{from_season:02d}E{from_episode:02d}: "
+                    f"ok={summary.get('ok')} skip={summary.get('skipped')} "
+                    f"fail={summary.get('failed')} dl={summary.get('downloaded')} "
+                    f"clone={summary.get('cloned')}"
+                    f"{' deferred=' + str(summary.get('next') or '') if summary.get('deferred') else ''}"
+                )
+            except Exception as exc:
+                self._log(f"Intro skip backfill S{from_season:02d}: {exc}")
+                continue
 
     def _start_download_thread(self, paused: PausedDownload) -> None:
         self._download_thread = threading.Thread(

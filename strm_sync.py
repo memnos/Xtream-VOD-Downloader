@@ -473,6 +473,18 @@ def _sync_movie_version_group(
     if not candidates:
         return "skipped", None
 
+    if not allow_4k:
+        from convert_4k_movies import revert_converted_if_local
+
+        sample_path, sample_hint = _resolve_movie_paths(
+            candidates[0], movies_output, tmdb_client, config
+        )
+        if sample_hint != "adult" and sample_path:
+            try:
+                revert_converted_if_local(sample_path)
+            except Exception:
+                pass
+
     saw_unmatched = False
     last_path: str | None = None
 
@@ -1119,6 +1131,7 @@ def run_strm_sync(host: str, user: str, password: str, config: dict | None = Non
         expected_movie_paths: set[str] = set()
         expected_episode_paths: set[str] = set()
         created_movie_paths: list[str] = []
+        movie_version_groups: dict[str, list[dict]] = {}
 
         if config.get("use_tmdb") and tmdb_client is None:
             _append_log(status, "TMDB enabled but API key missing — using raw names")
@@ -1176,6 +1189,7 @@ def run_strm_sync(host: str, user: str, password: str, config: dict | None = Non
                     filtered_versions.append(item)
 
             groups = group_catalog_versions(filtered_versions)
+            movie_version_groups = groups
             group_items = list(groups.items())
             _append_log(
                 status,
@@ -1485,6 +1499,19 @@ def run_strm_sync(host: str, user: str, password: str, config: dict | None = Non
                     f"{status.get('dirs_removed', 0)} empty dirs removed"
                 ),
             )
+
+        from convert_4k_movies import run_post_sync_4k_convert
+
+        run_post_sync_4k_convert(
+            host,
+            user,
+            password,
+            config,
+            status,
+            groups=movie_version_groups,
+            movies_output=movies_output,
+            tmdb_client=tmdb_client,
+        )
 
         if config.get("refresh_emby") or config.get("refresh_jellyfin"):
             status["phase"] = "refresh"

@@ -355,6 +355,8 @@ def jellyfin_attach_subtitle_file(
 
     if not item_id or not srt_path or not os.path.isfile(srt_path):
         return False
+    if xtream_playback_blocks_extra_streams():
+        return False
     try:
         raw = open(srt_path, "rb").read()
     except OSError:
@@ -602,6 +604,14 @@ def _publish_http_sub_for_strm(
     """Expose sidecar SRT as HTTP so PlaybackInfo keeps it for .strm Direct Play."""
     if not client or not item_id or not strm_path:
         return False
+    # StrmMediaImport Apply mid-play makes GuamaFlix drop the session.
+    if xtream_playback_blocks_extra_streams():
+        _log(
+            log,
+            f"Sottotitoli S{season:02d}E{episode:02d}: HTTP Apply differito "
+            f"(riproduzione strm in corso)",
+        )
+        return True
     folder = series_folder_from_path(strm_path)
     if not folder:
         return False
@@ -706,25 +716,32 @@ def ensure_italian_subs_for_strm(
         result["forced"] = has_forced
         # Re-attach existing sidecar so JF clients can select it on .strm/Http.
         if client is not None and item_id:
-            for path in sidecar_paths_for_strm(strm_path, forced=has_forced):
-                if os.path.isfile(path):
-                    if jellyfin_attach_subtitle_file(
-                        client, item_id, path, language=language, forced=has_forced
-                    ):
-                        result["source"] = "reattached"
-                    break
-            _publish_http_sub_for_strm(
-                client,
-                item_id=item_id,
-                strm_path=strm_path,
-                season=season,
-                episode=episode,
-                language=language,
-                config=config,
-                log=log,
-                verify_playback_info=verify_playback_info,
-                user_id=user_id,
-            )
+            if xtream_playback_blocks_extra_streams():
+                _log(
+                    log,
+                    f"Sottotitoli S{season:02d}E{episode:02d}: attach Jellyfin differito "
+                    f"(riproduzione strm in corso)",
+                )
+            else:
+                for path in sidecar_paths_for_strm(strm_path, forced=has_forced):
+                    if os.path.isfile(path):
+                        if jellyfin_attach_subtitle_file(
+                            client, item_id, path, language=language, forced=has_forced
+                        ):
+                            result["source"] = "reattached"
+                        break
+                _publish_http_sub_for_strm(
+                    client,
+                    item_id=item_id,
+                    strm_path=strm_path,
+                    season=season,
+                    episode=episode,
+                    language=language,
+                    config=config,
+                    log=log,
+                    verify_playback_info=verify_playback_info,
+                    user_id=user_id,
+                )
         return result
     if has_any and prefer_forced:
         # Keep full IT if forced unavailable; still try forced once.
@@ -818,7 +835,7 @@ def ensure_italian_subs_for_strm(
                         verify_playback_info=verify_playback_info,
                         user_id=user_id,
                     )
-                if refresh_paths and client is not None:
+                if refresh_paths and client is not None and not xtream_playback_blocks_extra_streams():
                     try:
                         client.notify_library_paths(
                             [{"Path": os.path.dirname(strm_path), "UpdateType": "Modified"}]
@@ -830,7 +847,7 @@ def ensure_italian_subs_for_strm(
             _log(log, f"OpenSubtitles S{season:02d}E{episode:02d}: {exc}")
 
     # 2) Fallback: Jellyfin remote search (usually full IT only)
-    if client is not None and item_id:
+    if client is not None and item_id and not xtream_playback_blocks_extra_streams():
         try:
             lang = "ita" if language in {"it", "ita"} else language
             entries = jellyfin_search_remote_subs(client, item_id, lang)
