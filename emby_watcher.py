@@ -2,6 +2,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 
 import requests
@@ -19,6 +20,7 @@ from core import (
     finalize_after_local_download,
     find_local_files_for_strm,
     find_subsequent_xtream_episodes,
+    local_download_should_resume,
     find_xtream_episode,
     growing_download_bytes,
     is_media_considered_watched,
@@ -164,6 +166,10 @@ class MediaServerClient:
         self.api_key = api_key
         self.server_type = (server_type or "emby").lower()
         self._user_id_cache: str | None = None
+        # Stable per-server device id for the Authorization/MediaBrowser header.
+        self._device_id = uuid.uuid5(
+            uuid.NAMESPACE_DNS, f"emby-watcher:{self.base_url}:{self.server_type}"
+        ).hex
 
     @property
     def display_name(self) -> str:
@@ -174,8 +180,25 @@ class MediaServerClient:
             return [path[5:], path]
         return [path]
 
+    def _auth_headers(self) -> dict:
+        """Auth headers for every request.
+
+        Jellyfin >= 10.12 disables the legacy `X-Emby-Token` header and
+        `api_key` query-string auth by default (EnableLegacyAuthorization=false),
+        which causes valid API keys to be rejected with HTTP 401. The
+        `Authorization: MediaBrowser ...` header is the non-deprecated method
+        and works on both old and new Jellyfin versions, as well as on Emby.
+        We keep X-Emby-Token alongside it for backward compatibility.
+        """
+        auth_value = (
+            'MediaBrowser Client="EmbyWatcher", Device="EmbyWatcher", '
+            f'DeviceId="{self._device_id}", Version="1.0.0", '
+            f'Token="{self.api_key}"'
+        )
+        return {"X-Emby-Token": self.api_key, "Authorization": auth_value}
+
     def _get(self, path: str, params: dict | None = None) -> object:
-        headers = {"X-Emby-Token": self.api_key}
+        headers = self._auth_headers()
         last_error: Exception | None = None
         for api_path in self._request_paths(path):
             query = {"api_key": self.api_key}
@@ -207,7 +230,7 @@ class MediaServerClient:
         raise RuntimeError(f"API request failed: {path}")
 
     def _post(self, path: str, body: dict | None = None, params: dict | None = None) -> object:
-        headers = {"X-Emby-Token": self.api_key}
+        headers = self._auth_headers()
         last_error: Exception | None = None
         for api_path in self._request_paths(path):
             url = f"{self.base_url}{api_path}"
@@ -247,7 +270,7 @@ class MediaServerClient:
         raise RuntimeError(f"API request failed: {path}")
 
     def _delete(self, path: str, params: dict | None = None) -> object:
-        headers = {"X-Emby-Token": self.api_key}
+        headers = self._auth_headers()
         last_error: Exception | None = None
         for api_path in self._request_paths(path):
             url = f"{self.base_url}{api_path}"
@@ -1335,19 +1358,10 @@ class AutoDownloadWatcher:
                 self._prefetch_key = playing.key
                 self._start_download_thread(paused)
                 return
-            # Drop a non-priority paused job so prefetch can take the slot;
-            # it will be rebuilt from the queue later if still needed.
-            if paused and not paused.priority:
-                self._log(
-                    f"Prefetch: scarto download in pausa non prioritario "
-                    f"({paused.item.label})"
-                )
-                self._paused_download = None
-                # Put it back at the front of the queue when possible.
-                try:
-                    self._queue.insert(0, paused.item)
-                except Exception:
-                    pass
+            # Keep a background download paused until prefetch actually starts.
+            # Proxy playback skips prefetch; dropping the job here left the
+            # partial file behind and the next pass treated it as finished.
+            held_pause = paused if paused and not paused.priority else None
 
         prepared = self._prepare_playing_prefetch(
             playing,
@@ -1359,6 +1373,18 @@ class AutoDownloadWatcher:
         )
         if not prepared:
             return
+        if held_pause is not None:
+            with self._lock:
+                if self._paused_download is held_pause:
+                    self._log(
+                        f"Prefetch: scarto download in pausa non prioritario "
+                        f"({held_pause.item.label})"
+                    )
+                    self._paused_download = None
+                    try:
+                        self._queue.insert(0, held_pause.item)
+                    except Exception:
+                        pass
         self._prefetch_key = playing.key
         self._prefetch_buffer_logged_key = None
         self._prefetch_decision_key = None
@@ -1586,7 +1612,9 @@ class AutoDownloadWatcher:
             item.series_name, item.season, item.episode, match["ext"], dest_root,
             strm_path=item.strm_path or None,
         )
-        if os.path.exists(output_file):
+        if local_download_should_resume(output_file):
+            self._log(f"File incompleto, ripresa: {item.label}")
+        elif os.path.isfile(output_file):
             result = finalize_after_local_download(
                 output_file, strm_path=item.strm_path or None
             )
@@ -2329,7 +2357,7 @@ class AutoDownloadWatcher:
                 _folder, output_file = build_episode_output(
                     ended.series_name, ep["season"], ep["episode"], ep["ext"], dest_root,
                 )
-                if os.path.exists(output_file):
+                if os.path.isfile(output_file) and not local_download_should_resume(output_file):
                     continue
                 candidates.append(
                     QueueItem(
@@ -2394,7 +2422,7 @@ class AutoDownloadWatcher:
                 ended.series_name, season_i, episode_i, xtream_match["ext"], dest_root,
                 strm_path=path,
             )
-            if os.path.exists(output_file):
+            if os.path.isfile(output_file) and not local_download_should_resume(output_file):
                 stats["exists"] += 1
                 continue
 

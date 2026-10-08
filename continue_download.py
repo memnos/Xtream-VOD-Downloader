@@ -23,6 +23,7 @@ from core import (
     load_json_file,
     load_strm_sync_config,
     local_download_exists_for_strm,
+    local_download_should_resume,
     parse_episode_numbers_from_path,
 )
 
@@ -172,6 +173,49 @@ def local_episode_watermark(series_folder: str) -> tuple[int, int] | None:
     return best
 
 
+def _download_final_name(name: str) -> str | None:
+    """Video filename, stripping a trailing ``.part`` from an in-progress download."""
+    candidate = name[:-5] if name.lower().endswith(".part") else name
+    if os.path.splitext(candidate)[1].lower() not in VIDEO_EXTENSIONS:
+        return None
+    return candidate
+
+
+def find_incomplete_local_episodes(series_folder: str) -> list[dict]:
+    """Episodes that still have a ``.part`` file because the download stopped."""
+    if not os.path.isdir(series_folder):
+        return []
+    folder_name = os.path.basename(os.path.realpath(series_folder))
+    series_name = _series_display_name(folder_name)
+    results: list[dict] = []
+    seen: set[tuple[int, int]] = set()
+    for dirpath, _dirs, files in os.walk(series_folder):
+        for name in files:
+            final_name = _download_final_name(name)
+            if not final_name:
+                continue
+            path = os.path.join(dirpath, final_name)
+            nums = parse_episode_numbers_from_path(path)
+            if not nums or nums in seen:
+                continue
+            if not local_download_should_resume(path):
+                continue
+            seen.add(nums)
+            season, episode = nums
+            results.append(
+                {
+                    "series_name": series_name,
+                    "season": season,
+                    "episode": episode,
+                    "strm_path": "",
+                    "label": f"{series_name} S{season:02d}E{episode:02d}",
+                    "series_folder": series_folder,
+                }
+            )
+    results.sort(key=lambda item: (item["season"], item["episode"]))
+    return results
+
+
 def _series_display_name(folder_name: str) -> str:
     name = _TMDB_SUFFIX_RE.sub("", folder_name or "").strip()
     return name or folder_name
@@ -258,6 +302,7 @@ def scan_and_enqueue_continue_downloads(
     folders = iter_downloaded_series_folders(download_roots)
     all_items: list[dict] = []
     for folder in folders:
+        all_items.extend(find_incomplete_local_episodes(folder))
         all_items.extend(
             find_newer_strm_episodes_for_series(folder, strm_root=strm_root)
         )

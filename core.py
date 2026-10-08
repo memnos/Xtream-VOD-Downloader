@@ -2162,6 +2162,32 @@ def owner_ids() -> tuple[int, int]:
     )
 
 
+def download_part_path(final_path: str) -> str:
+    """Sibling written by yt-dlp until the download is closed."""
+    if final_path.lower().endswith(".part"):
+        return final_path
+    return f"{final_path}.part"
+
+
+def local_download_should_resume(path: str) -> bool:
+    """True when bytes are still in a ``.part`` file and the final name is not closed.
+
+    yt-dlp writes ``<file>.mkv.part`` and renames it to ``<file>.mkv`` only after
+    the download finishes. The final name is the completion signal. A ``.part``
+    file is not a library episode and is resumed on the next pass.
+    """
+    if not path:
+        return False
+    final = path[:-5] if path.lower().endswith(".part") else path
+    if LOCAL_DOWNLOAD_MARKER not in os.path.basename(final):
+        return False
+    part = download_part_path(final)
+    try:
+        return os.path.isfile(part) and os.path.getsize(part) > 0
+    except OSError:
+        return False
+
+
 def _is_under_download_roots(path: str) -> bool:
     real = os.path.realpath(path)
     return any(real == root or real.startswith(root + os.sep) for root in DOWNLOAD_ROOTS)
@@ -3532,11 +3558,10 @@ def run_ytdlp(
         "detect_or_warn",
         "--newline",
         "--progress",
-        # Write into the final path so size/progress and mid-play switch see real bytes
-        # (default .part files are invisible to size checks and to the media library).
-        "--no-part",
+        # Keep bytes in ``<output>.part`` until yt-dlp exits successfully and
+        # renames to the final path. The library only sees a finished episode.
     ]
-    if resume or (os.path.exists(output_path) and os.path.getsize(output_path) > 0):
+    if resume or growing_download_bytes(output_path) > 0:
         cmd.append("--continue")
     proc = subprocess.Popen(
         cmd,
