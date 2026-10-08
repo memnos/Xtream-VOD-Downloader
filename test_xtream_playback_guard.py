@@ -131,14 +131,127 @@ class XtreamPassthroughSlotTest(unittest.TestCase):
         self.assertTrue(released.wait(2.0))
         xtream_passthrough_end("ep-a", gen2)
 
-    def test_second_episode_is_denied_until_first_ends(self):
-        from stream_proxy import xtream_passthrough_begin, xtream_passthrough_end
+    def test_second_play_does_not_preempt_first(self):
+        from stream_proxy import (
+            xtream_passthrough_aborted,
+            xtream_passthrough_acquire,
+            xtream_passthrough_end,
+        )
 
-        self.assertIsNone(xtream_passthrough_begin("night-manager"))
-        self.assertEqual(xtream_passthrough_begin("rick-morty"), "night-manager")
-        xtream_passthrough_end("night-manager")
-        self.assertIsNone(xtream_passthrough_begin("rick-morty"))
-        xtream_passthrough_end("rick-morty")
+        blocker, gen = xtream_passthrough_acquire("ep-a", mode="primary", origin="play")
+        self.assertIsNone(blocker)
+        blocker2, gen2 = xtream_passthrough_acquire(
+            "ep-b", mode="primary", origin="play"
+        )
+        self.assertEqual(blocker2, "ep-a")
+        self.assertEqual(gen2, 0)
+        self.assertFalse(xtream_passthrough_aborted(gen))
+        blocker3, gen3 = xtream_passthrough_acquire(
+            "ep-b", mode="preempt", origin="play"
+        )
+        self.assertEqual(blocker3, "ep-a")
+        self.assertEqual(gen3, 0)
+        self.assertFalse(xtream_passthrough_aborted(gen))
+        xtream_passthrough_end("ep-a", gen)
+        self.assertIsNone(
+            xtream_passthrough_acquire("ep-b", mode="primary", origin="play")[0]
+        )
+        xtream_passthrough_end("ep-b")
+
+    def test_second_episode_share_is_denied_while_first_plays(self):
+        from stream_proxy import xtream_passthrough_acquire, xtream_passthrough_end
+
+        self.assertIsNone(xtream_passthrough_acquire("ep-a", mode="primary")[0])
+        self.assertEqual(
+            xtream_passthrough_acquire("ep-b", mode="share")[0], "ep-a"
+        )
+        xtream_passthrough_end("ep-a")
+
+    def test_scan_does_not_preempt_play(self):
+        from stream_proxy import xtream_passthrough_acquire, xtream_passthrough_end
+
+        self.assertIsNone(
+            xtream_passthrough_acquire("ep-a", mode="primary", origin="play")[0]
+        )
+        blocker, gen = xtream_passthrough_acquire(
+            "ep-b", mode="primary", origin="scan"
+        )
+        self.assertEqual(blocker, "ep-a")
+        self.assertEqual(gen, 0)
+        blocker, gen = xtream_passthrough_acquire(
+            "ep-a", mode="preempt", origin="scan"
+        )
+        self.assertEqual(blocker, "ep-a")
+        self.assertEqual(gen, 0)
+        xtream_passthrough_end("ep-a")
+
+    def test_play_preempts_scan_of_another_episode(self):
+        import threading
+        import time
+
+        from stream_proxy import (
+            xtream_passthrough_aborted,
+            xtream_passthrough_acquire,
+            xtream_passthrough_end,
+        )
+
+        blocker, gen = xtream_passthrough_acquire(
+            "ep-a", mode="primary", origin="scan"
+        )
+        self.assertIsNone(blocker)
+        released = threading.Event()
+
+        def holder() -> None:
+            while not xtream_passthrough_aborted(gen):
+                time.sleep(0.01)
+            xtream_passthrough_end("ep-a", gen)
+            released.set()
+
+        threading.Thread(target=holder, daemon=True).start()
+        blocker2, gen2 = xtream_passthrough_acquire(
+            "ep-b", mode="primary", origin="play"
+        )
+        self.assertIsNone(blocker2)
+        self.assertNotEqual(gen2, gen)
+        self.assertTrue(released.wait(2.0))
+        xtream_passthrough_end("ep-b", gen2)
+
+    def test_play_preempts_scan_of_the_same_episode(self):
+        import threading
+        import time
+
+        from stream_proxy import (
+            xtream_passthrough_aborted,
+            xtream_passthrough_acquire,
+            xtream_passthrough_end,
+        )
+
+        blocker, gen = xtream_passthrough_acquire(
+            "ep-a", mode="primary", origin="scan"
+        )
+        self.assertIsNone(blocker)
+        released = threading.Event()
+
+        def holder() -> None:
+            while not xtream_passthrough_aborted(gen):
+                time.sleep(0.01)
+            xtream_passthrough_end("ep-a", gen)
+            released.set()
+
+        threading.Thread(target=holder, daemon=True).start()
+        blocker2, gen2 = xtream_passthrough_acquire(
+            "ep-a", mode="primary", origin="play"
+        )
+        self.assertIsNone(blocker2)
+        self.assertTrue(released.wait(2.0))
+        xtream_passthrough_end("ep-a", gen2)
+
+    def test_mediasource_user_agent_is_scan(self):
+        from stream_proxy import _passthrough_request_origin
+
+        self.assertEqual(_passthrough_request_origin("Silo/mediasource"), "scan")
+        self.assertEqual(_passthrough_request_origin("Silo/playback"), "play")
+        self.assertEqual(_passthrough_request_origin("Lavf/60.0"), "play")
 
 
 class PassthroughProbeDetectTest(unittest.TestCase):

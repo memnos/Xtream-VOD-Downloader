@@ -46,11 +46,15 @@ _REGISTRY_LOCK = threading.RLock()
 _REGISTRY_CACHE: dict | None = None
 _REGISTRY_DIRTY = 0
 _REGISTRY_FLUSH_EVERY = 250
-# Provider allows one Xtream connection. A second *title* must not steal the
-# stream already playing. Same episode may use 2 slots (play + MP4 moov/index).
-# Skip intro/recap preempts those GETs. A different title is always denied.
+# Provider allows one Xtream connection. Same episode may use 2 slots
+# (play + MP4 moov/index). Skip intro/recap preempts those GETs.
+# A play aborts a library scan, never another play. The viewer who holds the
+# slot keeps it; a second title waits until that play ends. A seek on the
+# title already playing still preempts that read. Probes (share) never steal.
+# Library scans (User-Agent Silo/mediasource) never abort a play.
 _XTREAM_SLOT_LOCK = threading.Lock()
 _XTREAM_HOLDER: str | None = None
+_XTREAM_HOLDER_ORIGIN: str | None = None
 _XTREAM_NEXT_GEN = 0
 _XTREAM_LIVE_GENS: set[int] = set()
 _XTREAM_ABORT = threading.Event()
@@ -116,12 +120,20 @@ def _passthrough_slot_mode(
     return "primary"
 
 
-def _xtream_take_slot(token: str) -> int:
-    global _XTREAM_HOLDER, _XTREAM_NEXT_GEN
+def _passthrough_request_origin(user_agent: str) -> str:
+    """Scan ffprobe uses Silo/mediasource. Playback relay uses Silo/playback."""
+    if "silo/mediasource" in (user_agent or "").lower():
+        return "scan"
+    return "play"
+
+
+def _xtream_take_slot(token: str, origin: str = "play") -> int:
+    global _XTREAM_HOLDER, _XTREAM_HOLDER_ORIGIN, _XTREAM_NEXT_GEN
     _XTREAM_NEXT_GEN += 1
     gen = _XTREAM_NEXT_GEN
     _XTREAM_LIVE_GENS.add(gen)
     _XTREAM_HOLDER = token
+    _XTREAM_HOLDER_ORIGIN = "scan" if origin == "scan" else "play"
     _XTREAM_SLOT_COUNTS[token] = _XTREAM_SLOT_COUNTS.get(token, 0) + 1
     _XTREAM_ABORT.clear()
     _XTREAM_IDLE.clear()
@@ -133,44 +145,81 @@ def xtream_passthrough_acquire(
     *,
     preempt_same: bool = True,
     mode: str | None = None,
+    origin: str | None = None,
 ) -> tuple[str | None, int]:
     """Return (blocker_or_None, generation). generation is 0 if blocked.
 
     mode: primary (play start), share (index/probe, up to 2), preempt (Skip).
+    A play aborts a scan, including a scan of the same episode. A play never
+    aborts a different title that is already playing; that second play is
+    denied until the holder ends. A seek (preempt) on the title already
+    playing still replaces that read. share never steals another title.
+    origin "scan" (library ffprobe) never aborts a play.
     """
     token = str(key or "").strip()
     if not token:
         return None, 0
     slot_mode = (mode or ("preempt" if preempt_same else "share")).strip() or "share"
+    request_origin = "scan" if origin == "scan" else "play"
     while True:
         wait_idle = False
         with _XTREAM_SLOT_LOCK:
             holder = _XTREAM_HOLDER
+            holder_origin = _XTREAM_HOLDER_ORIGIN or "play"
             count = int(_XTREAM_SLOT_COUNTS.get(token, 0) if holder == token else 0)
             if holder is None:
-                return None, _xtream_take_slot(token)
-            if holder != token:
+                return None, _xtream_take_slot(token, request_origin)
+            # A library scan must not kick the episode that is playing,
+            # including a scan of that same episode.
+            if request_origin == "scan" and holder_origin == "play":
                 return holder, 0
-            if slot_mode == "share" and count < XTREAM_SAME_KEY_SLOTS:
-                return None, _xtream_take_slot(token)
-            if slot_mode == "primary":
+            # Playback replaces whatever the scanner is reading.
+            if request_origin == "play" and holder_origin == "scan":
+                _XTREAM_ABORT.set()
+                wait_idle = True
+            elif holder != token:
+                # Probe/index must not kick the title that is playing.
+                if slot_mode == "share":
+                    return holder, 0
+                # Another viewer's play waits. Only a scan may be kicked,
+                # and that case was handled above.
+                if request_origin == "play" and holder_origin == "play":
+                    return holder, 0
+                _XTREAM_ABORT.set()
+                wait_idle = True
+            elif slot_mode == "share" and count < XTREAM_SAME_KEY_SLOTS:
+                return None, _xtream_take_slot(token, request_origin)
+            elif slot_mode == "primary":
                 # Duplicate bytes=0- must not consume the index slot.
                 return holder, 0
-            if slot_mode != "preempt":
+            elif slot_mode != "preempt":
                 return holder, 0
-            _XTREAM_ABORT.set()
-            wait_idle = True
+            else:
+                _XTREAM_ABORT.set()
+                wait_idle = True
         if wait_idle:
             _XTREAM_IDLE.wait(timeout=4.0)
             with _XTREAM_SLOT_LOCK:
                 holder = _XTREAM_HOLDER
-                if holder is None:
-                    return None, _xtream_take_slot(token)
-                if holder != token:
+                holder_origin = _XTREAM_HOLDER_ORIGIN or "play"
+                if request_origin == "scan" and holder is not None and holder_origin == "play":
                     return holder, 0
+                if (
+                    request_origin == "play"
+                    and holder is not None
+                    and holder != token
+                    and holder_origin == "play"
+                ):
+                    return holder, 0
+                if holder is None or holder == token:
+                    if holder == token:
+                        _XTREAM_LIVE_GENS.clear()
+                        _XTREAM_SLOT_COUNTS.clear()
+                    return None, _xtream_take_slot(token, request_origin)
+                # Previous title did not release in time: force-take.
                 _XTREAM_LIVE_GENS.clear()
                 _XTREAM_SLOT_COUNTS.clear()
-                return None, _xtream_take_slot(token)
+                return None, _xtream_take_slot(token, request_origin)
         return holder, 0
 
 
@@ -183,7 +232,7 @@ def xtream_passthrough_end(key: str, gen: int | None = None) -> None:
     token = str(key or "").strip()
     if not token:
         return
-    global _XTREAM_HOLDER
+    global _XTREAM_HOLDER, _XTREAM_HOLDER_ORIGIN
     with _XTREAM_SLOT_LOCK:
         if _XTREAM_HOLDER != token:
             return
@@ -195,6 +244,7 @@ def xtream_passthrough_end(key: str, gen: int | None = None) -> None:
         left = int(_XTREAM_SLOT_COUNTS.get(token, 1)) - 1
         if left <= 0:
             _XTREAM_HOLDER = None
+            _XTREAM_HOLDER_ORIGIN = None
             _XTREAM_SLOT_COUNTS.clear()
             _XTREAM_LIVE_GENS.clear()
             _XTREAM_ABORT.clear()
@@ -205,9 +255,10 @@ def xtream_passthrough_end(key: str, gen: int | None = None) -> None:
 
 def xtream_passthrough_reset() -> None:
     """Tests only."""
-    global _XTREAM_HOLDER, _XTREAM_NEXT_GEN
+    global _XTREAM_HOLDER, _XTREAM_HOLDER_ORIGIN, _XTREAM_NEXT_GEN
     with _XTREAM_SLOT_LOCK:
         _XTREAM_HOLDER = None
+        _XTREAM_HOLDER_ORIGIN = None
         _XTREAM_NEXT_GEN = 0
         _XTREAM_LIVE_GENS.clear()
         _XTREAM_SLOT_COUNTS.clear()
@@ -1001,10 +1052,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
             is_probe=is_probe,
             head_only=head_only,
         )
+        request_origin = _passthrough_request_origin(ua)
         print(
             f"[stream_proxy] begin {'HEAD' if head_only else 'GET'} "
             f"key={job.key[:12]} probe={int(is_probe)} mode={slot_mode_preview} "
-            f"range={rng} ua={(ua[:48] or '-')}",
+            f"origin={request_origin} range={rng} ua={(ua[:48] or '-')}",
             flush=True,
         )
         if _range_is_past_eof(start, int(job.total_size or 0)):
@@ -1021,11 +1073,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
             is_probe=is_probe,
             head_only=head_only,
         )
-        blocker, gen = xtream_passthrough_acquire(job.key, mode=slot_mode)
+        blocker, gen = xtream_passthrough_acquire(
+            job.key, mode=slot_mode, origin=request_origin
+        )
         if blocker:
             print(
                 f"[stream_proxy] xtream busy holder={blocker[:12]} denied={job.key[:12]}"
-                f" mode={slot_mode}{' probe' if is_probe else ''}",
+                f" mode={slot_mode} origin={request_origin}{' probe' if is_probe else ''}",
                 flush=True,
             )
             self.send_error(503, "xtream busy")
