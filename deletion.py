@@ -2,14 +2,18 @@ import json
 import os
 import re
 import shutil
+import time
 from datetime import datetime
 
 from core import (
     DATA_DIR,
     EPISODE_TAG_RE,
+    LOCAL_DOWNLOAD_MARKER,
+    SEASON_DIR_RE,
     SERIES_DOWNLOAD_PATHS,
     STRM_OUTPUT_SERIES_PATH,
     VIDEO_EXTENSIONS,
+    _remove_path_and_sidecars,
     align_episode_nfo_to_media,
     build_episode_stream_url,
     build_episode_strm_path,
@@ -29,6 +33,9 @@ from core import (
     sanitize_filename,
     write_strm,
 )
+
+SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".vtt", ".sub"}
+_IMAGE_SIDECAR_EXTENSIONS = {".nfo", ".jpg", ".jpeg", ".png", ".webp"}
 
 DELETION_PROMPTS_FILE = os.environ.get(
     "DELETION_PROMPTS_FILE", os.path.join(DATA_DIR, "deletion_prompts.json")
@@ -164,6 +171,44 @@ def _ordered_episodes(episodes: list) -> list[tuple[int, int, dict]]:
     return ordered
 
 
+def is_season_fully_watched(episodes: list, season: int) -> bool:
+    """True when every library episode of ``season`` is marked Played."""
+    try:
+        target = int(season)
+    except (TypeError, ValueError):
+        return False
+    season_eps = [item for season_i, _ep, item in _ordered_episodes(episodes) if season_i == target]
+    if not season_eps:
+        return False
+    for item in season_eps:
+        user_data = item.get("UserData") or {}
+        if not user_data.get("Played"):
+            return False
+    return True
+
+
+def iter_local_season_folders(series_folder: str) -> list[tuple[int, str]]:
+    """Return (season_number, season_dir) for Season XX folders that still have videos."""
+    found: list[tuple[int, str]] = []
+    if not os.path.isdir(series_folder):
+        return found
+    try:
+        entries = list(os.scandir(series_folder))
+    except OSError:
+        return found
+    for entry in entries:
+        if not entry.is_dir(follow_symlinks=True):
+            continue
+        match = SEASON_DIR_RE.match(entry.name)
+        if not match:
+            continue
+        if not folder_has_video_files(entry.path):
+            continue
+        found.append((int(match.group(1)), entry.path))
+    found.sort(key=lambda item: item[0])
+    return found
+
+
 def is_series_complete_after_episode(episodes: list, season: int, episode: int) -> bool:
     ordered = _ordered_episodes(episodes)
     if not ordered:
@@ -186,6 +231,30 @@ def should_prompt_series_deletion(episodes: list, season: int, episode: int) -> 
     return is_series_fully_watched(episodes) or is_series_complete_after_episode(
         episodes, season, episode
     )
+
+
+def deletion_prompt_identity(series_id: str, season: int | None = None) -> str:
+    sid = str(series_id or "").strip()
+    if season is None or season == "":
+        return sid
+    try:
+        return f"{sid}:S{int(season):02d}"
+    except (TypeError, ValueError):
+        return sid
+
+
+def _prompt_season_number(item: dict) -> int | None:
+    raw = item.get("season")
+    if raw in (None, ""):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _prompt_identity(item: dict) -> str:
+    return deletion_prompt_identity(str(item.get("series_id") or ""), _prompt_season_number(item))
 
 
 def _tmdb_client_for_status():
@@ -232,13 +301,17 @@ def series_production_finished(paths: list[str] | None = None, *, tmdb_id: int |
 
 
 def prune_incomplete_deletion_prompts() -> int:
-    """Drop pending deletion prompts for shows that are still airing / unknown on TMDB."""
+    """Drop full-series prompts for shows still airing; keep season-level prompts."""
     data = load_deletion_prompts()
     pending = data.get("pending", [])
     kept: list = []
     removed = 0
     for item in pending:
         if not isinstance(item, dict):
+            continue
+        # Season prompts are valid while the show is still returning.
+        if _prompt_season_number(item) is not None:
+            kept.append(item)
             continue
         paths = item.get("paths") or []
         if series_production_finished(paths):
@@ -251,22 +324,50 @@ def prune_incomplete_deletion_prompts() -> int:
     return removed
 
 
-def _prompt_matches_series_id(item: dict, series_id: str) -> bool:
-    if item.get("series_id") == series_id:
+def _prompt_matches_identity(
+    item: dict, series_id: str, *, season: int | None = None
+) -> bool:
+    target = deletion_prompt_identity(series_id, season)
+    if _prompt_identity(item) == target:
         return True
-    return series_id in {str(x) for x in (item.get("alternate_series_ids") or [])}
+    # Legacy callers may pass a bare series_id for a season prompt identity.
+    if season is None and str(item.get("series_id") or "") == str(series_id):
+        return True
+    if season is None and series_id in {str(x) for x in (item.get("alternate_series_ids") or [])}:
+        return True
+    # Identity may already be "id:S03".
+    if ":" in str(series_id) and _prompt_identity(item) == str(series_id):
+        return True
+    return False
 
 
-def add_deletion_prompt(series_id: str, series_name: str, paths: list[str]) -> bool:
+def add_deletion_prompt(
+    series_id: str,
+    series_name: str,
+    paths: list[str],
+    *,
+    season: int | None = None,
+) -> bool:
     if not paths:
         return False
+    try:
+        season_i = int(season) if season is not None and season != "" else None
+    except (TypeError, ValueError):
+        season_i = None
+    identity = deletion_prompt_identity(series_id, season_i)
     data = load_deletion_prompts()
     dismissed = set(data.get("dismissed", []))
-    if series_id in dismissed:
+    if identity in dismissed:
+        return False
+    if season_i is None and series_id in dismissed:
         return False
     new_paths = _prompt_path_keys(paths)
     for item in data.get("pending", []):
-        if item.get("series_id") == series_id:
+        same_season = _prompt_season_number(item) == season_i
+        same_series = str(item.get("series_id") or "") == str(series_id) or series_id in {
+            str(x) for x in (item.get("alternate_series_ids") or [])
+        }
+        if same_series and same_season:
             return False
         if new_paths and _prompt_path_keys(item.get("paths")) & new_paths:
             # Same folder already queued from the other media server — remember this id.
@@ -276,68 +377,83 @@ def add_deletion_prompt(series_id: str, series_name: str, paths: list[str]) -> b
                 item["alternate_series_ids"] = alt
                 save_deletion_prompts(data)
             return False
-    data["pending"].append(
-        {
-            "series_id": series_id,
-            "series_name": series_name,
-            "paths": paths,
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-        }
-    )
+    entry = {
+        "series_id": series_id,
+        "series_name": series_name,
+        "paths": paths,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    if season_i is not None:
+        entry["season"] = season_i
+    data["pending"].append(entry)
     save_deletion_prompts(data)
     return True
 
 
-def dismiss_deletion_prompt(series_id: str) -> None:
+def dismiss_deletion_prompt(series_id: str, *, season: int | None = None) -> None:
     data = load_deletion_prompts()
     pending = data.get("pending", [])
-    match = next((p for p in pending if _prompt_matches_series_id(p, series_id)), None)
+    match = next(
+        (p for p in pending if _prompt_matches_identity(p, series_id, season=season)),
+        None,
+    )
     dismissed = set(data.get("dismissed", []))
-    ids_to_dismiss = {series_id}
+    ids_to_dismiss = {deletion_prompt_identity(series_id, season)}
     if match:
+        ids_to_dismiss.add(_prompt_identity(match))
         ids_to_dismiss.add(str(match.get("series_id") or ""))
-        ids_to_dismiss.update(str(x) for x in (match.get("alternate_series_ids") or []))
+        ids_to_dismiss.update(
+            deletion_prompt_identity(str(x), _prompt_season_number(match))
+            for x in (match.get("alternate_series_ids") or [])
+        )
         match_paths = _prompt_path_keys(match.get("paths"))
+        match_season = _prompt_season_number(match)
         for item in pending:
             if item is match:
                 continue
             if match_paths and _prompt_path_keys(item.get("paths")) & match_paths:
-                ids_to_dismiss.add(str(item.get("series_id") or ""))
-                ids_to_dismiss.update(str(x) for x in (item.get("alternate_series_ids") or []))
+                if _prompt_season_number(item) == match_season:
+                    ids_to_dismiss.add(_prompt_identity(item))
     dismissed.update(x for x in ids_to_dismiss if x)
     data["dismissed"] = sorted(dismissed)
-    drop_ids = set(ids_to_dismiss)
+    drop_identities = set(ids_to_dismiss)
     data["pending"] = [
         p
         for p in pending
-        if str(p.get("series_id") or "") not in drop_ids
-        and not any(str(x) in drop_ids for x in (p.get("alternate_series_ids") or []))
+        if _prompt_identity(p) not in drop_identities
         and not (
             match
             and _prompt_path_keys(match.get("paths"))
             and _prompt_path_keys(p.get("paths")) & _prompt_path_keys(match.get("paths"))
+            and _prompt_season_number(p) == _prompt_season_number(match)
         )
     ]
     save_deletion_prompts(data)
 
 
-def remove_deletion_prompt(series_id: str) -> dict | None:
+def remove_deletion_prompt(series_id: str, *, season: int | None = None) -> dict | None:
     data = load_deletion_prompts()
     pending = data.get("pending", [])
-    match = next((p for p in pending if _prompt_matches_series_id(p, series_id)), None)
+    match = next(
+        (p for p in pending if _prompt_matches_identity(p, series_id, season=season)),
+        None,
+    )
     if not match:
         save_deletion_prompts(data)
         return None
     match_paths = _prompt_path_keys(match.get("paths"))
+    match_season = _prompt_season_number(match)
+    match_identity = _prompt_identity(match)
     data["pending"] = [
         p
         for p in pending
         if p is not match
+        and _prompt_identity(p) != match_identity
         and not (
             match_paths
             and _prompt_path_keys(p.get("paths")) & match_paths
+            and _prompt_season_number(p) == match_season
         )
-        and not _prompt_matches_series_id(p, series_id)
     ]
     save_deletion_prompts(data)
     return match
@@ -434,6 +550,7 @@ def restore_strm_for_episodes(
     result: dict = {
         "created": [],
         "updated": [],
+        "targets": [],
         "skipped": 0,
         "missing": [],
         "nfo_aligned": 0,
@@ -556,6 +673,7 @@ def restore_strm_for_episodes(
             prepare_output_dir(os.path.dirname(strm_path))
             existed = os.path.isfile(strm_path)
             changed = write_strm(strm_path, url)
+            result["targets"].append(strm_path)
             if changed and not existed:
                 result["created"].append(strm_path)
             elif changed:
@@ -571,19 +689,160 @@ def restore_strm_for_episodes(
     return result
 
 
+def _is_subtitle_filename(name: str) -> bool:
+    lower = (name or "").lower()
+    return any(lower.endswith(ext) for ext in SUBTITLE_EXTENSIONS)
+
+
+def _subtitle_suffix_after_episode(name: str) -> str:
+    """Return language/ext suffix after SxxExx, e.g. '.ita.srt' or ' [LOCAL].ita.srt'."""
+    match = EPISODE_TAG_RE.search(name or "")
+    if not match:
+        ext = os.path.splitext(name or "")[1]
+        return ext if ext else ".srt"
+    return (name or "")[match.end() :]
+
+
+def _strip_local_marker(name: str) -> str:
+    return (name or "").replace(LOCAL_DOWNLOAD_MARKER, "")
+
+
+def collect_subtitle_files(paths: list[str]) -> list[dict]:
+    """Inventory subtitle sidecars under download folders (kept across local delete)."""
+    found: list[dict] = []
+    seen: set[str] = set()
+    for root in paths:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirs, files in os.walk(root):
+            for name in files:
+                if not _is_subtitle_filename(name):
+                    continue
+                match = EPISODE_TAG_RE.search(name)
+                if not match:
+                    continue
+                full = os.path.realpath(os.path.join(dirpath, name))
+                if full in seen:
+                    continue
+                seen.add(full)
+                found.append(
+                    {
+                        "season": int(match.group(1)),
+                        "episode": int(match.group(2)),
+                        "path": full,
+                        "suffix": _strip_local_marker(_subtitle_suffix_after_episode(name)),
+                    }
+                )
+    return found
+
+
+def align_subtitles_to_strm(
+    subtitles: list[dict],
+    strm_paths: list[str],
+) -> list[str]:
+    """Move/rename kept subtitles beside restored .strm using matching SxxExx names."""
+    by_ep: dict[tuple[int, int], str] = {}
+    for strm_path in strm_paths:
+        if not strm_path:
+            continue
+        match = EPISODE_TAG_RE.search(os.path.basename(strm_path))
+        if not match:
+            continue
+        by_ep[(int(match.group(1)), int(match.group(2)))] = strm_path
+
+    moved: list[str] = []
+    for sub in subtitles:
+        key = (int(sub.get("season") or 0), int(sub.get("episode") or 0))
+        strm_path = by_ep.get(key)
+        src = str(sub.get("path") or "")
+        if not strm_path or not src or not os.path.isfile(src):
+            continue
+        suffix = str(sub.get("suffix") or ".srt")
+        if not suffix.startswith("."):
+            suffix = "." + suffix
+        dest = os.path.splitext(strm_path)[0] + suffix
+        dest_dir = os.path.dirname(dest)
+        try:
+            prepare_output_dir(dest_dir)
+            if os.path.realpath(src) == os.path.realpath(dest):
+                continue
+            if os.path.exists(dest):
+                # Prefer keeping an existing non-LOCAL sidecar; drop the duplicate.
+                if os.path.realpath(src) != os.path.realpath(dest):
+                    os.remove(src)
+                continue
+            shutil.move(src, dest)
+            moved.append(dest)
+        except OSError:
+            continue
+    return moved
+
+
+def _rmdir_if_empty(path: str) -> bool:
+    try:
+        if os.path.isdir(path) and not os.listdir(path):
+            os.rmdir(path)
+            return True
+    except OSError:
+        pass
+    return False
+
+
 def delete_series_downloads(paths: list[str]) -> list[str]:
+    """Delete local video downloads (and nfo/image sidecars); keep subtitles and .strm."""
     allowed_roots = [os.path.realpath(root) for root in SERIES_DOWNLOAD_ROOTS]
-    deleted = []
+    deleted: list[str] = []
     for path in paths:
         real_path = os.path.realpath(path)
         if not any(
             real_path == root or real_path.startswith(root + os.sep) for root in allowed_roots
         ):
             continue
-        if os.path.isdir(real_path):
-            shutil.rmtree(real_path)
+        if not os.path.isdir(real_path):
+            continue
+        for dirpath, _dirs, files in os.walk(real_path, topdown=False):
+            for name in files:
+                full = os.path.join(dirpath, name)
+                if not os.path.isfile(full):
+                    continue
+                ext = os.path.splitext(name)[1].lower()
+                if _is_subtitle_filename(name) or ext == ".strm":
+                    continue
+                if ext in VIDEO_EXTENSIONS:
+                    deleted.extend(_remove_path_and_sidecars(full))
+                    continue
+                # Leftover LOCAL-tagged nfo/thumbs not paired with a video basename.
+                if LOCAL_DOWNLOAD_MARKER in name and ext in _IMAGE_SIDECAR_EXTENSIONS:
+                    try:
+                        os.remove(full)
+                        deleted.append(os.path.realpath(full))
+                    except OSError:
+                        pass
+            _rmdir_if_empty(dirpath)
+        if _rmdir_if_empty(real_path):
             deleted.append(real_path)
+            parent = os.path.dirname(real_path)
+            if any(
+                parent == root or parent.startswith(root + os.sep) for root in allowed_roots
+            ):
+                if _rmdir_if_empty(parent):
+                    deleted.append(parent)
     return deleted
+
+
+def _series_folder_hint_from_paths(paths: list[str]) -> str:
+    """Series folder name for STRM restore (parent of Season XX when deleting one season)."""
+    for path in paths:
+        try:
+            real = os.path.realpath(path)
+        except OSError:
+            real = str(path or "").rstrip("/")
+        base = os.path.basename(real)
+        if SEASON_DIR_RE.match(base):
+            return os.path.basename(os.path.dirname(real))
+        if base:
+            return base
+    return ""
 
 
 def delete_series_downloads_and_restore_strm(
@@ -592,14 +851,13 @@ def delete_series_downloads_and_restore_strm(
     series_name: str,
     notify: bool = True,
 ) -> dict:
-    """Delete local downloads, recreate STRMs for those episodes, align NFOs, notify JF/Emby."""
+    """Delete local downloads, recreate STRMs for those episodes, align NFOs, notify JF/Emby.
+
+    Subtitle sidecars (.srt/.ass/…) are preserved and renamed next to the restored .strm.
+    """
     episodes = inventory_local_episodes(paths)
-    folder_hint = ""
-    if paths:
-        try:
-            folder_hint = os.path.basename(os.path.realpath(paths[0]))
-        except OSError:
-            folder_hint = os.path.basename(paths[0].rstrip("/"))
+    folder_hint = _series_folder_hint_from_paths(paths)
+    subtitles = collect_subtitle_files(paths)
 
     deleted = delete_series_downloads(paths)
     restore = restore_strm_for_episodes(
@@ -607,6 +865,10 @@ def delete_series_downloads_and_restore_strm(
         episodes,
         series_folder_hint=folder_hint,
     )
+    strm_paths = list(restore.get("targets") or []) or (
+        list(restore.get("created") or []) + list(restore.get("updated") or [])
+    )
+    restore["subtitles_moved"] = align_subtitles_to_strm(subtitles, strm_paths)
 
     notify_notes: list[str] = []
     if notify and (deleted or restore.get("created") or restore.get("updated")):
@@ -650,13 +912,50 @@ def _best_series_match(folder_name: str, candidates: list) -> dict | None:
     return candidates[0] if len(candidates) == 1 else None
 
 
+def _folder_display_name(folder_name: str) -> str:
+    name = re.sub(r"\s*\[tmdbid-\d+\]\s*$", "", folder_name or "", flags=re.IGNORECASE).strip()
+    name = re.sub(r"\s*\(\d{4}\)\s*$", "", name).strip()
+    return name or (folder_name or "").strip()
+
+
+def _resolve_scan_series_match(media, user_id: str, folder_name: str) -> dict | None:
+    """Map a local download folder to a media-server series id/name."""
+    tmdb_id = _folder_tmdb_id(folder_name)
+    server_type = str(getattr(media, "server_type", "") or "").strip().lower()
+    display = _folder_display_name(folder_name)
+    if tmdb_id and server_type == "silo":
+        # Prefer deterministic Silo ids from the folder TMDB tag — no extra API call.
+        return {"Id": f"series-tmdb-{tmdb_id}", "Name": display}
+
+    search_term = display.split(" (")[0].strip() or display
+    candidates = media.search_series(user_id, search_term)
+    match = _best_series_match(folder_name, candidates)
+    if match:
+        return match
+    return None
+
+
+def clear_deletion_dismissals() -> int:
+    """Forget 'No' answers so completed series can be offered again."""
+    data = load_deletion_prompts()
+    dismissed = data.get("dismissed") or []
+    count = len(dismissed) if isinstance(dismissed, list) else 0
+    data["dismissed"] = []
+    save_deletion_prompts(data)
+    return count
+
+
 def scan_completed_series_prompts(media, user_id: str) -> int:
-    """Find downloaded series that are fully watched and queue deletion prompts."""
+    """Queue deletion prompts for ended series or fully watched local seasons."""
     data = load_deletion_prompts()
     dismissed = set(data.get("dismissed", []))
-    pending_ids = {p.get("series_id") for p in data.get("pending", [])}
+    pending_identities = {_prompt_identity(p) for p in data.get("pending", []) if isinstance(p, dict)}
     for p in data.get("pending", []):
-        pending_ids.update(str(x) for x in (p.get("alternate_series_ids") or []))
+        if not isinstance(p, dict):
+            continue
+        pending_identities.add(str(p.get("series_id") or ""))
+        for alt in p.get("alternate_series_ids") or []:
+            pending_identities.add(deletion_prompt_identity(str(alt), _prompt_season_number(p)))
     pending_paths = set()
     for p in data.get("pending", []):
         pending_paths |= _prompt_path_keys(p.get("paths"))
@@ -672,32 +971,86 @@ def scan_completed_series_prompts(media, user_id: str) -> int:
             if real_folder in seen_folders or not folder_has_video_files(folder):
                 continue
             seen_folders.add(real_folder)
-            if real_folder in pending_paths:
+
+            tmdb_id = _folder_tmdb_id(folder_name)
+            ended = series_production_finished([folder], tmdb_id=tmdb_id)
+            local_seasons = iter_local_season_folders(folder)
+            # Skip airing shows with no Season XX downloads — nothing to free yet.
+            if not ended and not local_seasons:
                 continue
 
-            search_term = folder_name.split(" (")[0].strip() or folder_name
-            candidates = media.search_series(user_id, search_term)
-            match = _best_series_match(folder_name, candidates)
+            match = _resolve_scan_series_match(media, user_id, folder_name)
             if not match:
                 continue
 
             series_id = str(match.get("Id") or "")
-            if not series_id or series_id in dismissed or series_id in pending_ids:
+            if not series_id:
                 continue
-
-            episodes = media.get_series_episodes(user_id, series_id, include_user_data=True)
-            if not is_series_fully_watched(episodes):
-                continue
-
             series_name = str(match.get("Name") or folder_name).strip()
-            paths = find_series_download_paths(series_name)
-            if not paths:
-                paths = [folder]
-            if not series_production_finished(paths, tmdb_id=_folder_tmdb_id(folder_name)):
+
+            try:
+                episodes = media.get_series_episodes(
+                    user_id, series_id, include_user_data=True, resolve_paths=False
+                )
+            except TypeError:
+                # Emby/Jellyfin clients do not take resolve_paths.
+                try:
+                    episodes = media.get_series_episodes(
+                        user_id, series_id, include_user_data=True
+                    )
+                except Exception:
+                    episodes = []
+            except Exception:
+                episodes = []
+            if not episodes:
+                # Transient empty catalog responses — brief pause + retry.
+                time.sleep(0.5)
+                try:
+                    episodes = media.get_series_episodes(
+                        user_id, series_id, include_user_data=True, resolve_paths=False
+                    )
+                except TypeError:
+                    try:
+                        episodes = media.get_series_episodes(
+                            user_id, series_id, include_user_data=True
+                        )
+                    except Exception:
+                        continue
+                except Exception:
+                    continue
+            if not episodes:
                 continue
-            if add_deletion_prompt(series_id, series_name, paths):
-                added += 1
-                pending_ids.add(series_id)
-                pending_paths |= _prompt_path_keys(paths)
+
+            # Whole series: only when TMDB says ended and every library episode is watched.
+            if ended and is_series_fully_watched(episodes):
+                if (
+                    series_id not in dismissed
+                    and deletion_prompt_identity(series_id) not in dismissed
+                    and series_id not in pending_identities
+                    and real_folder not in pending_paths
+                ):
+                    paths = find_series_download_paths(series_name) or [folder]
+                    if add_deletion_prompt(series_id, series_name, paths):
+                        added += 1
+                        pending_identities.add(series_id)
+                        pending_paths |= _prompt_path_keys(paths)
+                continue
+
+            # Still airing (or not fully watched): offer each fully watched local season.
+            for season_num, season_path in local_seasons:
+                season_real = os.path.realpath(season_path)
+                identity = deletion_prompt_identity(series_id, season_num)
+                if identity in dismissed or identity in pending_identities:
+                    continue
+                if season_real in pending_paths:
+                    continue
+                if not is_season_fully_watched(episodes, season_num):
+                    continue
+                if add_deletion_prompt(
+                    series_id, series_name, [season_path], season=season_num
+                ):
+                    added += 1
+                    pending_identities.add(identity)
+                    pending_paths.add(season_real)
 
     return added

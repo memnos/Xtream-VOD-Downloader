@@ -12,6 +12,7 @@ import requests
 import discarded_movie_streams as dms
 from strm_sync import (
     _sync_movie_version_group,
+    forced_subtitle_paths,
     settle_unavailable_movie,
     stream_url_explicitly_rejected,
 )
@@ -450,6 +451,102 @@ class SyncAlternateProbeTests(unittest.TestCase):
         resolve_mock.assert_not_called()
         self.assertTrue(os.path.isfile(strm_path))
 
+
+    def test_no_italian_audio_skips_create_and_tries_next_version(self):
+        versions = [
+            {
+                "stream_id": "30",
+                "name": "Film (2024) 1080p",
+                "container_extension": "mp4",
+            },
+            {
+                "stream_id": "31",
+                "name": "Film (2024) 720p",
+                "container_extension": "mp4",
+            },
+        ]
+        strm_path = os.path.join(self.root, "Film (2024)", "Film (2024).strm")
+        store = dms.load_discarded_streams()
+
+        def probe(url, timeout=45):
+            if "/30." in url:
+                return {
+                    "duration": 100.0,
+                    "streams": [{"type": "Audio", "language": "eng", "title": ""}],
+                }
+            return {
+                "duration": 100.0,
+                "streams": [{"type": "Audio", "language": "ita", "title": ""}],
+            }
+
+        with patch("strm_sync._resolve_movie_paths", return_value=(strm_path, "")), patch(
+            "strm_sync.probe_stream_media_info", side_effect=probe
+        ), patch("strm_sync.local_download_exists_for_strm", return_value=False):
+            result, path = _sync_movie_version_group(
+                versions,
+                "http://h",
+                "u",
+                "p",
+                self.root,
+                update_existing=False,
+                tmdb_client=None,
+                config={},
+                allow_4k=True,
+                discarded_store=store,
+            )
+        self.assertEqual(result, "created")
+        self.assertEqual(path, strm_path)
+        self.assertTrue(os.path.isfile(strm_path))
+        self.assertIn("31.mp4", open(strm_path, encoding="utf-8").read())
+        self.assertNotIn("30", store.get("streams") or {})
+
+    def test_no_italian_audio_does_not_write_strm(self):
+        versions = [
+            {
+                "stream_id": "40",
+                "name": "Film (2025)",
+                "container_extension": "mp4",
+            },
+        ]
+        strm_path = os.path.join(self.root, "Film (2025)", "Film (2025).strm")
+        store = dms.load_discarded_streams()
+        media = {
+            "duration": 100.0,
+            "streams": [{"type": "Audio", "language": "eng", "title": "English"}],
+        }
+        with patch("strm_sync._resolve_movie_paths", return_value=(strm_path, "")), patch(
+            "strm_sync.probe_stream_media_info", return_value=media
+        ), patch("strm_sync.local_download_exists_for_strm", return_value=False):
+            result, path = _sync_movie_version_group(
+                versions,
+                "http://h",
+                "u",
+                "p",
+                self.root,
+                update_existing=False,
+                tmdb_client=None,
+                config={},
+                allow_4k=True,
+                discarded_store=store,
+            )
+        self.assertEqual(result, "no_italian")
+        self.assertFalse(os.path.isfile(strm_path))
+        self.assertNotIn("40", store.get("streams") or {})
+
+    def test_updated_movie_without_forced_is_searched(self):
+        folder = os.path.join(self.root, "Film (2023)")
+        os.makedirs(folder)
+        created = os.path.join(folder, "New.strm")
+        updated = os.path.join(folder, "Updated.strm")
+        already = os.path.join(folder, "Has.strm")
+        for path in (created, updated, already):
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("http://example/x\n")
+        base, _ext = os.path.splitext(already)
+        with open(base + ".ita.forced.srt", "w", encoding="utf-8") as handle:
+            handle.write("1\n00:00:01,000 --> 00:00:02,000\nCiao\n")
+        paths = forced_subtitle_paths([created], [updated, already], language="it")
+        self.assertEqual(paths, [created, updated])
 
 class StreamRejectionTests(unittest.TestCase):
     def test_only_explicit_client_errors_count(self):

@@ -40,13 +40,83 @@ class DeletionRestoreTest(unittest.TestCase):
             dl = os.path.join(tmp, "download")
             outside = os.path.join(tmp, "outside")
             series = os.path.join(dl, "Show")
-            os.makedirs(series)
+            season = os.path.join(series, "Season 01")
+            os.makedirs(season)
             os.makedirs(outside)
+            video = os.path.join(season, f"Show - S01E01{LOCAL_DOWNLOAD_MARKER}.mkv")
+            with open(video, "wb") as handle:
+                handle.write(b"video")
             with patch("deletion.SERIES_DOWNLOAD_ROOTS", (dl,)):
                 deleted = delete_series_downloads([series, outside])
-            self.assertEqual(deleted, [os.path.realpath(series)])
+            self.assertTrue(any(os.path.realpath(video) == os.path.realpath(p) for p in deleted))
             self.assertFalse(os.path.isdir(series))
             self.assertTrue(os.path.isdir(outside))
+
+    def test_delete_preserves_subtitles_and_aligns_to_strm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dl = os.path.join(tmp, "download")
+            strm_root = os.path.join(tmp, "strm")
+            series = os.path.join(dl, "Show (2022) [tmdbid-9]")
+            season = os.path.join(series, "Season 01")
+            os.makedirs(season)
+            video = os.path.join(
+                season, f"Show (2022) [tmdbid-9] - S01E01{LOCAL_DOWNLOAD_MARKER}.mkv"
+            )
+            sub = os.path.join(
+                season, f"Show (2022) [tmdbid-9] - S01E01{LOCAL_DOWNLOAD_MARKER}.ita.srt"
+            )
+            plain_sub = os.path.join(season, "Show (2022) - S01E02.ita.srt")
+            with open(video, "wb") as handle:
+                handle.write(b"video")
+            for path, body in ((sub, "1\n"), (plain_sub, "2\n")):
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(body)
+
+            with patch("deletion.SERIES_DOWNLOAD_ROOTS", (dl,)), patch(
+                "deletion.SERIES_DOWNLOAD_PATHS", (dl,)
+            ), patch(
+                "deletion.load_credentials",
+                return_value={"host": "http://x", "user": "u", "password": "p"},
+            ), patch(
+                "deletion.load_auto_download_config", return_value={"allow_4k": False}
+            ), patch(
+                "deletion.load_strm_sync_config",
+                return_value={"series_output": strm_root, "use_tmdb": False},
+            ), patch(
+                "deletion.find_xtream_series",
+                return_value={"series_id": 1, "name": "Show"},
+            ), patch(
+                "deletion.get_series_info",
+                return_value={
+                    "episodes": {
+                        "1": [
+                            {
+                                "id": 42,
+                                "episode_num": 1,
+                                "container_extension": "mkv",
+                            },
+                            {
+                                "id": 43,
+                                "episode_num": 2,
+                                "container_extension": "mkv",
+                            },
+                        ]
+                    }
+                },
+            ):
+                # Only E01 has a local video, so only E01 is inventoried/restored.
+                result = delete_series_downloads_and_restore_strm(
+                    [series], series_name="Show", notify=False
+                )
+
+            self.assertFalse(os.path.isfile(video))
+            self.assertTrue(result["restore"]["created"])
+            strm_path = result["restore"]["created"][0]
+            aligned = os.path.splitext(strm_path)[0] + ".ita.srt"
+            self.assertTrue(os.path.isfile(aligned), aligned)
+            self.assertFalse(os.path.isfile(sub))
+            # E02 subtitle kept in place (no matching restored strm yet).
+            self.assertTrue(os.path.isfile(plain_sub))
 
     def test_restore_strm_for_episodes_writes_and_aligns_nfo(self):
         with tempfile.TemporaryDirectory() as tmp:

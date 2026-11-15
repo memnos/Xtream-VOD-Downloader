@@ -43,13 +43,14 @@ class ContinueDownloadTest(unittest.TestCase):
         os.makedirs(local_season)
         os.makedirs(strm_season)
         for ep in (2, 3, 4, 5):
-            open(
+            with open(
                 os.path.join(
                     local_season,
                     f"{series} - S03E{ep:02d} [LOCAL].mkv",
                 ),
-                "w",
-            ).close()
+                "wb",
+            ) as handle:
+                handle.write(b"x")
         for ep in (1, 6, 7):
             open(
                 os.path.join(strm_season, f"House of the Dragon (2022) - S03E{ep:02d}.strm"),
@@ -82,6 +83,38 @@ class ContinueDownloadTest(unittest.TestCase):
             {(3, 6), (3, 7)},
         )
         self.assertEqual(continue_download.take_pending_auto_downloads(), [])
+
+    def test_scan_requeues_part_file(self):
+        folder = self._make_hotd()
+        season = os.path.join(folder, "Season 03")
+        series = "House of the Dragon (2022) [tmdbid-94997]"
+        final = os.path.join(season, f"{series} - S03E02 [LOCAL].mkv")
+        os.remove(final)
+        with open(final + ".part", "wb") as handle:
+            handle.write(b"x" * 100)
+        items = continue_download.find_incomplete_local_episodes(folder)
+        self.assertEqual([(i["season"], i["episode"]) for i in items], [(3, 2)])
+        result = continue_download.scan_and_enqueue_continue_downloads(
+            strm_root=self.strm
+        )
+        pending = continue_download.take_pending_auto_downloads()
+        self.assertIn((3, 2), {(p["season"], p["episode"]) for p in pending})
+        self.assertGreaterEqual(result["queued"], 1)
+
+
+class PartFileCompletionTest(unittest.TestCase):
+    def test_part_file_is_incomplete_until_renamed(self):
+        from core import local_download_should_resume
+
+        with tempfile.TemporaryDirectory() as tmp:
+            final = os.path.join(tmp, "Show - S01E02 [LOCAL].mkv")
+            part = final + ".part"
+            with open(part, "wb") as handle:
+                handle.write(b"x" * 50)
+            self.assertTrue(local_download_should_resume(final))
+            self.assertTrue(local_download_should_resume(part))
+            os.replace(part, final)
+            self.assertFalse(local_download_should_resume(final))
 
 
 class TmdbEndedGateTest(unittest.TestCase):

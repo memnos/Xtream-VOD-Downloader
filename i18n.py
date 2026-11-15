@@ -15,6 +15,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
     "en": {
         "page_title": "Xtream VOD Downloader",
         "app_title": "📺 Xtream VOD Downloader for Emby & Jellyfin",
+        "hero_kicker": "VOD library",
+        "hero_title": "Xtream Downloader",
+        "hero_subtitle": "Movies and series for Emby, Jellyfin and Silo",
         "lang_label": "Language",
         "all_categories": "All categories",
         "api_hint": "Tip: select a specific category instead of «All categories».",
@@ -43,12 +46,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "no_categories": "No categories available.",
         "btn_save": "Save: {label}",
         "hidden_categories_saved": "Hidden categories updated.",
-        "series_completed": "🗑️ Series completed",
+        "series_completed": "🗑️ Series / seasons ready to free up",
         "series_completed_help": (
-            "You finished watching these series. Delete local downloads from disk "
-            "(folders under /download/tv)? Matching `.strm` files will be recreated "
-            "for those episodes and episode `.nfo` files will be realigned."
+            "These finished series (TMDB ended) or fully watched local seasons can be "
+            "deleted from disk (folders under /download/tv). Matching `.strm` files will "
+            "be recreated and episode `.nfo` files realigned."
         ),
+        "season_completed_title": "{name} — Season {season}",
         "folders_to_delete": "{count} folder(s) to delete",
         "btn_delete_yes": "✅ Yes, delete from disk",
         "btn_delete_no": "❌ No, keep files",
@@ -93,11 +97,11 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "download_line": "- **{title}** ({type}, {mode}) — {time}",
         "log_watcher": "Watcher log",
         "updated_at": "Updated at {time} (auto-refresh every {seconds}s)",
-        "auto_download_title": "🤖 Automatic download (Emby / Jellyfin)",
+        "auto_download_title": "🤖 Automatic download (Emby / Jellyfin / Silo)",
         "auto_download_help": (
-            "When you finish an episode on Emby or Jellyfin, subsequent episodes available in the library "
+            "When you finish an episode on Emby, Jellyfin, or Silo, subsequent episodes available in the library "
             "as `.strm` only are downloaded to your download folders (same as manual mode). "
-            "You can enable **both** Emby and Jellyfin at once; the watcher monitors each configured server. "
+            "You can enable Emby, Jellyfin, and Silo together; the watcher monitors each configured server. "
             "If you watch from `.strm` (same Xtream provider), the download pauses and resumes "
             "when playback ends. Already downloaded local files do not block new downloads. "
             "**No need** to click «Connect and load catalog»: the watcher uses Xtream credentials "
@@ -106,7 +110,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         ),
         "enable_auto": "Enable automatic download",
         "prompt_delete_completed": "Ask to delete completed series",
-        "prompt_delete_help": "Only when TMDB marks the show as ended/canceled and every episode is watched.",
+        "prompt_delete_help": (
+            "Offer deletion when a local season is fully watched, or when TMDB marks the "
+            "whole show as ended/canceled and every episode is watched."
+        ),
         "continue_download_incomplete": "Keep downloading new episodes for incomplete series",
         "continue_download_incomplete_help": (
             "After strm sync, auto-download newer episodes for series that already "
@@ -178,10 +185,22 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "stream_proxy_rewrite_episodes_result": (
             "Rewrote {updated} episode .strm (scanned {scanned}, skipped {skipped})."
         ),
+        "options_prefetch_section": "Prefetch & movie cleanup",
+        "options_common_section": "Common options (prefetch, proxy, paths)",
         "emby_section": "Emby",
         "jellyfin_section": "Jellyfin",
+        "silo_section": "Silo",
+        "rescan_completed_series": "Rescan watched downloads for deletion",
+        "rescan_completed_series_added": "Queued {count} series for deletion confirmation.",
+        "rescan_completed_series_none": (
+            "No new items found (need local season downloads fully watched, or a TMDB-ended "
+            "series with every episode watched)."
+        ),
+        "clear_deletion_dismissals": "Reset ignored deletion prompts ({count})",
+        "clear_deletion_dismissals_done": "Cleared {count} ignored deletion prompt(s).",
         "enable_emby": "Monitor Emby",
         "enable_jellyfin": "Monitor Jellyfin",
+        "enable_silo": "Monitor Silo",
         "emby_url": "Emby URL",
         "emby_url_help": (
             "Emby base URL. With Docker network_mode host use http://localhost:8096. "
@@ -191,18 +210,29 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "jellyfin_url_help": (
             "Jellyfin base URL (often a different port than Emby, e.g. http://localhost:8096)."
         ),
+        "silo_url": "Silo URL",
+        "silo_url_help": (
+            "Silo base URL. On this host it answers on port 8090, e.g. http://127.0.0.1:8090."
+        ),
         "emby_api_key": "Emby API key",
         "jellyfin_api_key": "Jellyfin API key",
+        "silo_api_key": "Silo API key",
         "emby_username": "Emby username",
         "jellyfin_username": "Jellyfin username",
+        "silo_username": "Silo username",
         "emby_username_help": "Must match the Emby user watching content on Apple TV / other clients.",
         "jellyfin_username_help": "Must match the Jellyfin user watching content on Apple TV / other clients.",
+        "silo_username_help": (
+            "Must match the Silo user who is watching. The API key must belong to an "
+            "administrator (it starts with sa_)."
+        ),
         "series_dest_auto": "Series destination (automatic)",
         "cooldown_seconds": "Pause after episode ends (seconds)",
         "poll_interval": "Server poll interval (seconds)",
         "save_auto_settings": "💾 Save automatic settings",
         "test_emby_connection": "🔌 Test Emby",
         "test_jellyfin_connection": "🔌 Test Jellyfin",
+        "test_silo_connection": "🔌 Test Silo",
         "server_test_missing_fields": "Fill in URL, API key and username first.",
         "server_test_ok": "**{server}** — {detail}",
         "server_test_fail": "**{server}** — {detail}",
@@ -229,7 +259,94 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "mode_duration": "Duration audit",
         "mode_auto": "Automatic download",
         "mode_assist": "Playback assist",
+        "mode_local_movies": "Local movies",
+        "mode_subtitles": "Subtitles",
+        "subs_menu_title": "Request subtitles",
+        "subs_menu_help": (
+            "Search OpenSubtitles and save the file next to the video, strm or local. "
+            "The list is the libraries of the enabled servers, not the Xtream catalog. "
+            "Italian plus one other language, forced and/or full."
+        ),
+        "subs_kind": "Library",
+        "subs_kind_movies": "Movies",
+        "subs_kind_series": "Series",
+        "subs_search": "Title",
+        "subs_search_help": "Matches titles in Silo, Jellyfin and Emby, whichever are enabled.",
+        "subs_servers": "Searching {servers}",
+        "subs_no_servers": "No media server is enabled. Turn on Silo, Jellyfin or Emby in Playback assist.",
+        "subs_type_more": "Type at least two letters.",
+        "subs_searching": "Searching the libraries…",
+        "subs_pick": "Match",
+        "subs_no_match": "No title matches.",
+        "subs_lang_it": "Italian",
+        "subs_lang_other": "Other language",
+        "subs_lang_other_help": "OpenSubtitles code, for example en, fr, es. Leave empty to skip.",
+        "subs_forced": "Forced",
+        "subs_full": "Full",
+        "subs_need_choice": "Choose at least one language, and Forced or Full.",
+        "subs_bad_lang": "The other language must be a 2 or 3 letter code.",
+        "subs_need_title": "Choose a title.",
+        "subs_started": "Search started. It keeps running if you leave this page.",
+        "subs_still_running": "Searching {title} ({done}/{total})…",
+        "subs_file_saved": "The file is there: {name}. Downloaded on {when}.",
+        "subs_file_existing": "The file was already there: {name}. File date {when}.",
+        "subs_file_missing": "The file is not there ({language} {kind} {label}).",
+        "subs_file_saved_unknown_time": "The subtitle for {title} was saved. Open the log for the file name.",
+        "subs_log": "Details",
+        "subs_busy": "A request is already running.",
+        "subs_rescan": "Rescan library",
+        "subs_count": "{count} results",
+        "subs_request": "Search and download",
+        "subs_need_creds": "Set the OpenSubtitles username and password under Playback assist first.",
+        "subs_progress": "{done}/{total} · saved {ok} · already there {skipped} · missing {failed}",
+        "local_movies_title": "Local movies",
+        "local_movies_help": (
+            "Scans `/download/movies` for local video files (mkv, mp4, avi, …), "
+            "not only `[LOCAL]` downloads. Trailers are ignored. "
+            "«Xtream catalog» is yes when the title matches the provider VOD list "
+            "(so a `.strm` can be recreated). Delete frees disk and restores that `.strm`."
+        ),
+        "local_movies_rescan": "Rescan",
+        "local_movies_scanning": "Loading Xtream movie catalog and scanning local files…",
+        "local_movies_need_creds": "Enter Xtream credentials to check the VOD catalog.",
+        "local_movies_count": "{count} local movie(s)",
+        "local_movies_count_detail": "{count} local · {catalog} in Xtream catalog",
+        "local_movies_empty": "No local movie downloads found.",
+        "local_movies_filter": "Filter",
+        "local_movies_filter_all": "All",
+        "local_movies_filter_yes": "Xtream yes",
+        "local_movies_filter_no": "Xtream no",
+        "local_movies_filter_count": "Showing {count}",
+        "local_movies_col_title": "Movie",
+        "local_movies_col_size": "Size",
+        "local_movies_col_strm": "Xtream",
+        "local_movies_col_action": "",
+        "local_movies_delete": "Delete",
+        "local_movies_delete_help": "Delete local file and restore .strm from Xtream",
+        "local_movies_delete_disabled": "Title not found in Xtream catalog (cannot restore .strm)",
+        "local_movies_selected": "Selected {selected} · deletable {ready}",
+        "local_movies_selected_skipped": "{count} selected without Xtream match (skipped)",
+        "local_movies_delete_selected": "Delete selected",
+        "local_movies_delete_selected_help": "Delete selected movies that exist in Xtream and restore their .strm",
+        "local_movies_bulk_confirm": "Delete {count} movie(s) and restore .strm?",
+        "local_movies_deleting": "Deleting {count} movie(s)…",
+        "local_movies_bulk_ok": "Deleted {count} movie(s) and restored .strm.",
+        "local_movies_bulk_partial": "Deleted {ok}; errors: {errors}",
+        "local_movies_bulk_err": "Delete failed: {errors}",
+        "local_movies_confirm_yes": "Yes",
+        "local_movies_confirm_no": "No",
+        "local_movies_deleted_ok": "Deleted «{title}» and restored .strm.",
+        "local_movies_deleted_err": "Could not delete «{title}»: {error}",
         "assist_title": "Playback assist (intro skip + subtitles)",
+        "assist_intro_section": "Intro skip options",
+        "assist_subs_section": "Subtitle options",
+        "assist_status_log": "Watcher / assist log",
+        "assist_subtitle_jobs_log": "Forced subtitle jobs log",
+        "assist_subtitle_jobs_log_help": (
+            "Overnight sync and new-episode forced searches (IT → EN/FPO → DeepL). "
+            "Same content as .data/subtitle_jobs.log."
+        ),
+        "assist_subtitle_jobs_log_empty": "No forced subtitle job lines yet.",
         "assist_help": (
             "When you start watching a series episode on Emby/Jellyfin, the watcher can "
             "create intro skip segments and download Italian subtitles beside the `.strm`. "
@@ -258,13 +375,19 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         ),
         "auto_subs_enabled": "Auto-download Italian subtitles",
         "auto_subs_help": (
-            "On episode play, download subtitles for that episode and the rest of the season. "
-            "Writes `.ita.forced.srt` or `.ita.srt` next to the `.strm` (strm branch)."
+            "On episode play, download subtitles for every episode of that series. "
+            "Writes `.ita.forced.srt` or `.ita.srt` next to the `.strm` (strm branch). "
+            "A new movie, or an updated movie that has no forced file, gets one when it exists. "
+            "A new episode gets a forced subtitle when its .strm is created. "
+            "If Italian forced is missing, English forced/foreign-parts are translated with DeepL Free. "
+            "A movie with no Italian audio is not written; the next sync adds it when Italian audio is there."
         ),
         "auto_subs_prefer_forced": "Prefer forced Italian, else full Italian",
         "auto_subs_prefer_forced_help": (
-            "OpenSubtitles foreign-parts/forced first. Jellyfin remote search rarely marks "
-            "Forced correctly, so OpenSubtitles credentials are recommended."
+            "OpenSubtitles Italian forced/foreign-parts first; if missing, English forced "
+            "translated via DeepL Free; otherwise full Italian. "
+            "Jellyfin remote search rarely marks Forced correctly, so OpenSubtitles credentials "
+            "are recommended."
         ),
         "auto_subs_language": "Subtitle language code",
         "auto_subs_language_help": "OpenSubtitles language (default: it).",
@@ -277,9 +400,24 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "opensubtitles_password": "OpenSubtitles password",
         "opensubtitles_api_key": "OpenSubtitles API key",
         "opensubtitles_api_key_help": "Defaults to the Jellyfin plugin key if left empty.",
+        "deepl_section": "DeepL Free (EN forced → IT)",
+        "deepl_help": (
+            "When Italian forced subtitles are missing, download English forced / foreign-parts-only "
+            "from OpenSubtitles and translate them with DeepL Free (~500k characters/month). "
+            "Get a free API key at https://www.deepl.com/pro-api (Free plan; keys end with :fx)."
+        ),
+        "deepl_api_key": "DeepL Free API key",
+        "deepl_api_key_help": "Leave empty to skip EN→IT translation. Free keys end with :fx.",
+        "deepl_quota_status": "DeepL Free usage this month: {used}/{limit} characters ({remaining} left).",
+        "deepl_quota_exhausted": "DeepL Free monthly quota is exhausted. EN forced will not be translated until it resets.",
+        "deepl_quota_exhausted_detail": (
+            "DeepL Free monthly quota exhausted ({used}/{limit} characters). "
+            "EN forced subtitles will not be translated until next month (or add LibreTranslate later)."
+        ),
+        "deepl_quota_check_failed": "Could not check DeepL quota: {error}",
         "save_assist_settings": "Save assist settings",
         "assist_settings_saved": "Assist settings saved.",
-        "assist_need_media_server": "Enable Jellyfin (or Emby) under Automatic download first.",
+        "assist_need_media_server": "Enable Jellyfin, Emby, or Silo under Automatic download first.",
         "assist_status_caption": "Watcher / assist status",
         "assist_status_line": "Running: {running} · Intro: {intro} · Subs: {subs} · Playing: {playing}",
         "yes": "yes",
@@ -381,7 +519,11 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "strm_hidden_excluded": "Hidden categories excluded: {vod} movie · {series} series (manage in the sidebar)",
         "strm_sync_movies": "Sync movies",
         "strm_sync_series": "Sync TV series",
+        "strm_paths_section": "Paths, update and cleanup",
         "strm_movies_output": "Movies output folder",
+        "strm_duration_options": "Audit options",
+        "strm_jf_push_options": "Jellyfin push options",
+        "strm_mismatch_options": "Mismatch resolve options",
         "strm_series_output": "Series output folder",
         "strm_output_help": "Path inside the container, e.g. /strm/movies",
         "strm_movie_categories": "Movie categories (empty = all visible)",
@@ -730,6 +872,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
     "it": {
         "page_title": "Xtream VOD Downloader",
         "app_title": "📺 Xtream VOD Downloader per Emby e Jellyfin",
+        "hero_kicker": "Libreria VOD",
+        "hero_title": "Xtream Downloader",
+        "hero_subtitle": "Film e serie per Emby, Jellyfin e Silo",
         "lang_label": "Lingua",
         "all_categories": "Tutte le categorie",
         "api_hint": "Suggerimento: seleziona una categoria specifica invece di «Tutte le categorie».",
@@ -758,12 +903,13 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "no_categories": "Nessuna categoria disponibile.",
         "btn_save": "Salva: {label}",
         "hidden_categories_saved": "Categorie nascoste aggiornate.",
-        "series_completed": "🗑️ Serie completata",
+        "series_completed": "🗑️ Serie / stagioni da liberare",
         "series_completed_help": (
-            "Hai finito di guardare queste serie. Vuoi eliminare dal disco i download locali "
-            "(cartelle in /download/tv)? Per quegli episodi verranno ricreati gli `.strm` "
-            "e riallineati gli `.nfo`."
+            "Serie finite (TMDB conclusa) o stagioni locali completamente viste: puoi "
+            "eliminare i download dal disco (cartelle in /download/tv). Per quegli episodi "
+            "verranno ricreati gli `.strm` e riallineati gli `.nfo`."
         ),
+        "season_completed_title": "{name} — Stagione {season}",
         "folders_to_delete": "{count} cartella/e da eliminare",
         "btn_delete_yes": "✅ Sì, elimina dal disco",
         "btn_delete_no": "❌ No, mantieni i file",
@@ -808,11 +954,11 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "download_line": "- **{title}** ({type}, {mode}) — {time}",
         "log_watcher": "Log watcher",
         "updated_at": "Aggiornato alle {time} (refresh automatico ogni {seconds}s)",
-        "auto_download_title": "🤖 Download automatico (Emby / Jellyfin)",
+        "auto_download_title": "🤖 Download automatico (Emby / Jellyfin / Silo)",
         "auto_download_help": (
-            "Quando finisci un episodio su Emby o Jellyfin, gli episodi successivi presenti in libreria "
+            "Quando finisci un episodio su Emby, Jellyfin o Silo, gli episodi successivi presenti in libreria "
             "solo come `.strm` vengono scaricati nelle cartelle di download (come la modalità manuale). "
-            "Puoi abilitare **entrambi** Emby e Jellyfin: il watcher monitora ogni server configurato. "
+            "Puoi abilitare insieme Emby, Jellyfin e Silo: il watcher monitora ogni server configurato. "
             "Se guardi da `.strm` (stesso provider Xtream), il download va in pausa e riprende "
             "automaticamente a fine riproduzione. I file locali già scaricati non bloccano il download. "
             "**Non serve** premere «Connetti e carica catalogo»: il watcher usa le credenziali Xtream "
@@ -821,7 +967,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         ),
         "enable_auto": "Abilita download automatico",
         "prompt_delete_completed": "Chiedi eliminazione serie completata",
-        "prompt_delete_help": "Solo se TMDB segna la serie come terminata/cancellata e tutti gli episodi sono visti.",
+        "prompt_delete_help": (
+            "Propone l'eliminazione quando una stagione locale è tutta vista, oppure quando "
+            "TMDB segna l'intera serie come terminata/cancellata e tutti gli episodi sono visti."
+        ),
         "continue_download_incomplete": "Continua a scaricare episodi nuovi per serie incomplete",
         "continue_download_incomplete_help": (
             "Dopo il sync degli .strm, scarica automaticamente gli episodi più nuovi "
@@ -891,10 +1040,22 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "stream_proxy_rewrite_episodes_result": (
             "Riscritti {updated} .strm episodio (scansionati {scanned}, saltati {skipped})."
         ),
+        "options_prefetch_section": "Prefetch e pulizia film",
+        "options_common_section": "Opzioni comuni (prefetch, proxy, percorsi)",
         "emby_section": "Emby",
         "jellyfin_section": "Jellyfin",
+        "silo_section": "Silo",
+        "rescan_completed_series": "Riscansiona download visti per eliminazione",
+        "rescan_completed_series_added": "Aggiunte {count} serie in attesa di conferma eliminazione.",
+        "rescan_completed_series_none": (
+            "Nessun nuovo elemento (servono stagioni locali tutte viste, oppure una serie "
+            "conclusa su TMDB con tutti gli episodi visti)."
+        ),
+        "clear_deletion_dismissals": "Ripristina richieste eliminazione ignorate ({count})",
+        "clear_deletion_dismissals_done": "Ripristinate {count} richieste ignorate.",
         "enable_emby": "Monitora Emby",
         "enable_jellyfin": "Monitora Jellyfin",
+        "enable_silo": "Monitora Silo",
         "emby_url": "URL Emby",
         "emby_url_help": (
             "URL base di Emby. Con Docker network_mode host usa http://localhost:8096. "
@@ -904,18 +1065,29 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "jellyfin_url_help": (
             "URL base di Jellyfin (spesso porta diversa da Emby, es. http://localhost:8096)."
         ),
+        "silo_url": "URL Silo",
+        "silo_url_help": (
+            "URL base di Silo. Su questo host risponde sulla porta 8090, es. http://127.0.0.1:8090."
+        ),
         "emby_api_key": "API key Emby",
         "jellyfin_api_key": "API key Jellyfin",
+        "silo_api_key": "API key Silo",
         "emby_username": "Username Emby",
         "jellyfin_username": "Username Jellyfin",
+        "silo_username": "Username Silo",
         "emby_username_help": "Deve corrispondere all'utente Emby che guarda i contenuti su Apple TV / altri client.",
         "jellyfin_username_help": "Deve corrispondere all'utente Jellyfin che guarda i contenuti su Apple TV / altri client.",
+        "silo_username_help": (
+            "Deve corrispondere all'utente Silo che sta guardando. L'API key deve essere "
+            "di un amministratore (inizia con sa_)."
+        ),
         "series_dest_auto": "Destinazione serie (automatico)",
         "cooldown_seconds": "Pausa dopo fine episodio (secondi)",
         "poll_interval": "Intervallo controllo server (secondi)",
         "save_auto_settings": "💾 Salva impostazioni automatiche",
         "test_emby_connection": "🔌 Test Emby",
         "test_jellyfin_connection": "🔌 Test Jellyfin",
+        "test_silo_connection": "🔌 Test Silo",
         "server_test_missing_fields": "Compila prima URL, API key e username.",
         "server_test_ok": "**{server}** — {detail}",
         "server_test_fail": "**{server}** — {detail}",
@@ -942,7 +1114,94 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "mode_duration": "Audit durata",
         "mode_auto": "Download automatico",
         "mode_assist": "Assist riproduzione",
+        "mode_local_movies": "Film locali",
+        "mode_subtitles": "Sottotitoli",
+        "subs_menu_title": "Richiedi sottotitoli",
+        "subs_menu_help": (
+            "Cerca su OpenSubtitles e salva il file accanto al video, strm o locale. "
+            "L'elenco è quello delle librerie dei server abilitati, non il catalogo Xtream. "
+            "Italiano più un'altra lingua, forced e/o completi."
+        ),
+        "subs_kind": "Libreria",
+        "subs_kind_movies": "Film",
+        "subs_kind_series": "Serie",
+        "subs_search": "Titolo",
+        "subs_search_help": "Cerca i titoli in Silo, Jellyfin ed Emby, quelli abilitati.",
+        "subs_servers": "Cerco in {servers}",
+        "subs_no_servers": "Nessun server è abilitato. Attiva Silo, Jellyfin o Emby in Assist riproduzione.",
+        "subs_type_more": "Scrivi almeno due lettere.",
+        "subs_searching": "Cerco nelle librerie…",
+        "subs_pick": "Corrispondenza",
+        "subs_no_match": "Nessun titolo corrisponde.",
+        "subs_lang_it": "Italiano",
+        "subs_lang_other": "Altra lingua",
+        "subs_lang_other_help": "Codice OpenSubtitles, per esempio en, fr, es. Vuoto per non usarla.",
+        "subs_forced": "Forced",
+        "subs_full": "Completi",
+        "subs_need_choice": "Scegli almeno una lingua, e Forced oppure Completi.",
+        "subs_bad_lang": "L'altra lingua deve essere un codice di 2 o 3 lettere.",
+        "subs_need_title": "Scegli un titolo.",
+        "subs_started": "Ricerca avviata. Continua anche se esci da questa pagina.",
+        "subs_still_running": "Sto cercando {title} ({done}/{total})…",
+        "subs_file_saved": "Il file c'è: {name}. Scaricato il {when}.",
+        "subs_file_existing": "Il file c'era già: {name}. Data del file: {when}.",
+        "subs_file_missing": "Il file non c'è ({language} {kind} {label}).",
+        "subs_file_saved_unknown_time": "Il sottotitolo di {title} è stato salvato. Nel dettaglio c'è il nome del file.",
+        "subs_log": "Dettaglio",
+        "subs_busy": "C'è già una richiesta in corso.",
+        "subs_rescan": "Riscansiona libreria",
+        "subs_count": "{count} risultati",
+        "subs_request": "Cerca e scarica",
+        "subs_need_creds": "Prima imposta username e password OpenSubtitles in Assist riproduzione.",
+        "subs_progress": "{done}/{total} · salvati {ok} · già presenti {skipped} · assenti {failed}",
+        "local_movies_title": "Film locali",
+        "local_movies_help": (
+            "Scansiona `/download/movies` per i file video locali (mkv, mp4, avi, …), "
+            "non solo i download `[LOCAL]`. I trailer vengono ignorati. "
+            "«Catalogo Xtream» è sì quando il titolo corrisponde al VOD del provider "
+            "(così si può ricreare lo `.strm`). Elimina libera spazio e ripristina lo `.strm`."
+        ),
+        "local_movies_rescan": "Riscan",
+        "local_movies_scanning": "Carico il catalogo film Xtream e scansiono i file locali…",
+        "local_movies_need_creds": "Inserisci le credenziali Xtream per controllare il catalogo VOD.",
+        "local_movies_count": "{count} film locali",
+        "local_movies_count_detail": "{count} locali · {catalog} nel catalogo Xtream",
+        "local_movies_empty": "Nessun film locale trovato.",
+        "local_movies_filter": "Filtro",
+        "local_movies_filter_all": "Tutti",
+        "local_movies_filter_yes": "Xtream sì",
+        "local_movies_filter_no": "Xtream no",
+        "local_movies_filter_count": "Visibili {count}",
+        "local_movies_col_title": "Film",
+        "local_movies_col_size": "Dim.",
+        "local_movies_col_strm": "Xtream",
+        "local_movies_col_action": "",
+        "local_movies_delete": "Elimina",
+        "local_movies_delete_help": "Elimina il file locale e ripristina lo .strm da Xtream",
+        "local_movies_delete_disabled": "Titolo non trovato nel catalogo Xtream (impossibile ripristinare lo .strm)",
+        "local_movies_selected": "Selezionati {selected} · eliminabili {ready}",
+        "local_movies_selected_skipped": "{count} selezionati senza match Xtream (saltati)",
+        "local_movies_delete_selected": "Elimina selezionati",
+        "local_movies_delete_selected_help": "Elimina i film selezionati presenti su Xtream e ripristina lo .strm",
+        "local_movies_bulk_confirm": "Eliminare {count} film e ripristinare gli .strm?",
+        "local_movies_deleting": "Eliminazione di {count} film…",
+        "local_movies_bulk_ok": "Eliminati {count} film e ripristinati gli .strm.",
+        "local_movies_bulk_partial": "Eliminati {ok}; errori: {errors}",
+        "local_movies_bulk_err": "Eliminazione fallita: {errors}",
+        "local_movies_confirm_yes": "Sì",
+        "local_movies_confirm_no": "No",
+        "local_movies_deleted_ok": "Eliminato «{title}» e ripristinato lo .strm.",
+        "local_movies_deleted_err": "Impossibile eliminare «{title}»: {error}",
         "assist_title": "Assist riproduzione (intro skip + sottotitoli)",
+        "assist_intro_section": "Opzioni intro skip",
+        "assist_subs_section": "Opzioni sottotitoli",
+        "assist_status_log": "Log watcher / assist",
+        "assist_subtitle_jobs_log": "Log job sottotitoli forced",
+        "assist_subtitle_jobs_log_help": (
+            "Ricerche forced della sync notturna e degli episodi nuovi (IT → EN/FPO → DeepL). "
+            "Stesso contenuto di .data/subtitle_jobs.log."
+        ),
+        "assist_subtitle_jobs_log_empty": "Nessuna riga di job forced ancora.",
         "assist_help": (
             "Quando inizi a guardare un episodio su Emby/Jellyfin, il watcher può "
             "creare i segmenti intro skip e scaricare i sottotitoli italiani accanto allo `.strm`. "
@@ -971,13 +1230,18 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         ),
         "auto_subs_enabled": "Download automatico sottotitoli italiani",
         "auto_subs_help": (
-            "Alla riproduzione, scarica i sottotitoli per quell'episodio e il resto della stagione. "
-            "Scrive `.ita.forced.srt` o `.ita.srt` accanto allo `.strm` (branch strm)."
+            "Alla riproduzione di un episodio, scarica i sottotitoli per tutti gli episodi della serie. "
+            "Scrive `.ita.forced.srt` o `.ita.srt` accanto allo `.strm` (branch strm). "
+            "Un film nuovo, o un film aggiornato senza forced, lo riceve se esiste. "
+            "Un episodio nuovo lo riceve quando viene creato lo .strm. "
+            "Se manca il forced italiano, traduce forced/foreign-parts inglesi con DeepL Free. "
+            "Un film senza audio italiano non viene scritto; il sync successivo lo aggiunge quando c'è l'audio italiano."
         ),
         "auto_subs_prefer_forced": "Preferisci forced italiani, altrimenti italiani completi",
         "auto_subs_prefer_forced_help": (
-            "Prima OpenSubtitles foreign-parts/forced. La ricerca remota di Jellyfin raramente "
-            "segna Forced correttamente: meglio le credenziali OpenSubtitles."
+            "Prima forced/foreign-parts italiani su OpenSubtitles; se mancano, forced inglesi "
+            "tradotti con DeepL Free; altrimenti italiano completo. "
+            "La ricerca remota di Jellyfin raramente segna Forced correttamente: meglio OpenSubtitles."
         ),
         "auto_subs_language": "Codice lingua sottotitoli",
         "auto_subs_language_help": "Lingua OpenSubtitles (default: it).",
@@ -990,9 +1254,24 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "opensubtitles_password": "Password OpenSubtitles",
         "opensubtitles_api_key": "API key OpenSubtitles",
         "opensubtitles_api_key_help": "Se vuoto, usa la chiave del plugin Jellyfin.",
+        "deepl_section": "DeepL Free (forced EN → IT)",
+        "deepl_help": (
+            "Se manca il forced italiano, scarica forced / foreign-parts-only inglesi da OpenSubtitles "
+            "e li traduce con DeepL Free (~500k caratteri/mese). "
+            "Chiave gratis su https://www.deepl.com/pro-api (piano Free; le chiavi finiscono con :fx)."
+        ),
+        "deepl_api_key": "API key DeepL Free",
+        "deepl_api_key_help": "Lascia vuoto per non tradurre EN→IT. Le chiavi Free finiscono con :fx.",
+        "deepl_quota_status": "Uso DeepL Free questo mese: {used}/{limit} caratteri (ne restano {remaining}).",
+        "deepl_quota_exhausted": "Quota mensile DeepL Free esaurita. I forced EN non verranno tradotti finché non si resetta.",
+        "deepl_quota_exhausted_detail": (
+            "Quota mensile DeepL Free esaurita ({used}/{limit} caratteri). "
+            "I forced EN non verranno tradotti fino al prossimo mese (oppure si potrà aggiungere LibreTranslate)."
+        ),
+        "deepl_quota_check_failed": "Impossibile verificare la quota DeepL: {error}",
         "save_assist_settings": "Salva impostazioni assist",
         "assist_settings_saved": "Impostazioni assist salvate.",
-        "assist_need_media_server": "Abilita prima Jellyfin (o Emby) nel menu Download automatico.",
+        "assist_need_media_server": "Abilita prima Jellyfin, Emby o Silo nel menu Download automatico.",
         "assist_status_caption": "Stato watcher / assist",
         "assist_status_line": "Attivo: {running} · Intro: {intro} · Subs: {subs} · In play: {playing}",
         "yes": "sì",
@@ -1095,7 +1374,11 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "strm_hidden_excluded": "Categorie nascoste escluse: {vod} film · {series} serie (gestisci nella sidebar)",
         "strm_sync_movies": "Sincronizza film",
         "strm_sync_series": "Sincronizza serie TV",
+        "strm_paths_section": "Percorsi, aggiornamento e cleanup",
         "strm_movies_output": "Cartella output film",
+        "strm_duration_options": "Opzioni audit",
+        "strm_jf_push_options": "Opzioni push Jellyfin",
+        "strm_mismatch_options": "Opzioni risoluzione mismatch",
         "strm_series_output": "Cartella output serie",
         "strm_output_help": "Percorso nel container, es. /strm/movies",
         "strm_movie_categories": "Categorie film (vuoto = tutte le visibili)",
