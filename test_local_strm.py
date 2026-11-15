@@ -264,9 +264,19 @@ class LocalStrmHelpersTest(unittest.TestCase):
 
             with patch("core.SERIES_DOWNLOAD_PATHS", (dl_root,)), patch(
                 "core.DOWNLOAD_TV_PATH", dl_root
-            ):
+            ), patch("core.STRM_OUTPUT_SERIES_PATH", strm_root):
                 self.assertTrue(local_download_exists_for_strm(strm_path))
                 self.assertEqual(find_local_files_for_strm(strm_path), [local_path])
+                self.assertEqual(find_strm_files_for_local(local_path), [])
+                self.assertEqual(
+                    find_strm_files_for_local(local_path, allow_unmarked=True),
+                    [strm_path],
+                )
+                deleted = delete_strm_after_local_download(
+                    local_path, allow_unmarked=True
+                )
+                self.assertIn(os.path.realpath(strm_path), deleted)
+                self.assertFalse(os.path.exists(strm_path))
 
     def test_find_local_prefers_local_marker_over_scene_release(self):
         with tempfile.TemporaryDirectory() as tmp:
