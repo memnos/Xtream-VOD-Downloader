@@ -356,11 +356,34 @@ def quality_rank(name: str) -> tuple[int, int, int]:
     return (resolution_score(name), source_score(name), -len(name or ""))
 
 
-def quality_rank_for_item(name: str, probe: dict | None = None) -> tuple[int, int, int, int]:
+def item_added_timestamp(item: dict | None) -> int:
+    """Xtream VOD `added` field (unix seconds). Missing/invalid → 0."""
+    if not item:
+        return 0
+    raw = item.get("added")
+    try:
+        return int(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def quality_rank_for_item(
+    name: str,
+    probe: dict | None = None,
+    *,
+    added: int = 0,
+) -> tuple:
+    """Rank catalog versions: name quality tags first, then newer `added`.
+
+    Resolution/source tags in the title always beat recency. When titles carry
+    no useful quality signal (or tags tie), the higher Xtream `added` timestamp
+    wins so a later untagged upload replaces an older one.
+    """
     name_res, name_src, name_len = quality_rank(name)
+    added_ts = int(added or 0)
     if name_res > 0:
         audio_bonus = int((probe or {}).get("audio_bitrate") or 0)
-        return (name_res, name_src, audio_bonus, name_len)
+        return (name_res, name_src, audio_bonus, added_ts, name_len)
     if probe:
         height = int(probe.get("height") or 0)
         width = int(probe.get("width") or 0)
@@ -369,8 +392,9 @@ def quality_rank_for_item(name: str, probe: dict | None = None) -> tuple[int, in
             res = 2160
         video_br = int(probe.get("bitrate") or 0)
         audio_br = int(probe.get("audio_bitrate") or 0)
-        return (res, video_br, audio_br, source_score(name))
-    return (name_res, name_src, 0, name_len)
+        return (res, video_br, audio_br, source_score(name), added_ts)
+    # No resolution tag and no probe: source tag (if any), then recency.
+    return (name_res, name_src, added_ts, name_len)
 
 
 def normalize_base_title(name: str) -> str:
@@ -426,6 +450,7 @@ def pick_best_catalog_item(
         key=lambda item: quality_rank_for_item(
             str(item.get(name_key, "")),
             (probes or {}).get(_item_stream_key(item)),
+            added=item_added_timestamp(item),
         ),
     )
 
@@ -479,6 +504,7 @@ def sort_catalog_versions(
         key=lambda item: quality_rank_for_item(
             str(item.get(name_key, "")),
             (probes or {}).get(_item_stream_key(item)),
+            added=item_added_timestamp(item),
         ),
         reverse=True,
     )
@@ -1234,12 +1260,12 @@ def local_download_exists_for_strm(strm_path: str) -> bool:
 def find_strm_files_for_local(local_path: str) -> list[str]:
     """Find .strm library files replaced by a local download."""
     local_path = os.path.realpath(local_path)
-    if LOCAL_DOWNLOAD_MARKER not in os.path.basename(local_path):
-        return []
-
     found: list[str] = []
     episode_numbers = parse_episode_numbers_from_path(local_path)
     if episode_numbers is not None:
+        # Episode path: only treat explicit [LOCAL] downloads as overrides.
+        if LOCAL_DOWNLOAD_MARKER not in os.path.basename(local_path):
+            return []
         season, episode = episode_numbers
         series_folder = series_folder_from_media_path(local_path) or ""
         se_tag = f"S{int(season):02d}E{int(episode):02d}"
@@ -1268,12 +1294,25 @@ def find_strm_files_for_local(local_path: str) -> list[str]:
         match = find_strm_folder_match(STRM_OUTPUT_MOVIES_PATH, movie_folder)
         if match:
             search_dirs.append(os.path.join(STRM_OUTPUT_MOVIES_PATH, match))
+    tmdb_id = _extract_tmdb_id_from_path(local_path) or _extract_tmdb_id_from_path(
+        movie_folder
+    )
+    tmdb_match = find_folder_by_tmdb_id(STRM_OUTPUT_MOVIES_PATH, tmdb_id)
+    if tmdb_match:
+        search_dirs.append(os.path.join(STRM_OUTPUT_MOVIES_PATH, tmdb_match))
+    seen_dirs: set[str] = set()
     for directory in search_dirs:
-        if not os.path.isdir(directory):
+        real_dir = os.path.realpath(directory)
+        if real_dir in seen_dirs or not os.path.isdir(real_dir):
             continue
-        for filename in os.listdir(directory):
+        seen_dirs.add(real_dir)
+        try:
+            names = os.listdir(real_dir)
+        except OSError:
+            continue
+        for filename in names:
             if filename.lower().endswith(".strm"):
-                found.append(os.path.join(directory, filename))
+                found.append(os.path.join(real_dir, filename))
     return list(dict.fromkeys(found))
 
 
@@ -1475,6 +1514,237 @@ def delete_strm_after_local_download(
     return deleted
 
 
+def _is_xtream_movie_url(url: str) -> bool:
+    text = (url or "").strip()
+    if not text:
+        return False
+    lower = text.lower()
+    if "/p/movie/" in lower or "/p/episode/" in lower:
+        return False
+    return True
+
+
+def resolve_movie_restore_url(
+    local_path: str,
+    *,
+    strm_url: str | None = None,
+    host: str = "",
+    user: str = "",
+    password: str = "",
+    allow_4k: bool = False,
+    catalog: list | None = None,
+    movie_name: str = "",
+) -> str:
+    """Xtream (non-proxy) URL needed to recreate a movie .strm after local delete."""
+    remote = (strm_url or "").strip()
+    if _is_xtream_movie_url(remote):
+        return remote
+    meta = read_movie_strm_url_sidecar(local_path)
+    remote = str(meta.get("url") or "").strip()
+    if _is_xtream_movie_url(remote):
+        return remote
+    candidates: list[str] = []
+    target = resolve_movie_strm_restore_path(local_path)
+    if target:
+        candidates.append(target)
+    candidates.extend(find_strm_files_for_local(local_path))
+    seen: set[str] = set()
+    for path in candidates:
+        real = os.path.realpath(path)
+        if real in seen or not real.lower().endswith(".strm"):
+            continue
+        seen.add(real)
+        if not os.path.isfile(real):
+            continue
+        found = (read_strm_url(real) or "").strip()
+        if _is_xtream_movie_url(found):
+            return found
+
+    if host and user and password:
+        title = (movie_name or "").strip() or os.path.basename(
+            movie_download_dir(local_path)
+        )
+        match = find_xtream_movie(
+            host,
+            user,
+            password,
+            title,
+            allow_4k=allow_4k,
+            catalog=catalog,
+        )
+        if match and match.get("stream_id") is not None:
+            ext = str(match.get("container_extension") or "mp4")
+            return build_movie_stream_url(
+                host, user, password, match["stream_id"], ext
+            )
+    return ""
+
+
+_TRAILER_NAME_RE = re.compile(
+    r"(?:^|[\s._\-\[(])trailer(?:[\s._\-\])]|$)", re.IGNORECASE
+)
+
+
+def _is_trailer_filename(name: str) -> bool:
+    stem = os.path.splitext(name or "")[0]
+    return bool(_TRAILER_NAME_RE.search(stem))
+
+
+def pick_movie_folder_video(directory: str) -> str | None:
+    """Pick the main video in a movie folder (prefer [LOCAL], skip trailers)."""
+    if not directory or not os.path.isdir(directory):
+        return None
+    preferred: str | None = None
+    candidates: list[tuple[int, str]] = []
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return None
+    for name in names:
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in VIDEO_EXTENSIONS:
+            continue
+        if _is_trailer_filename(name):
+            continue
+        full = os.path.join(directory, name)
+        try:
+            if not os.path.isfile(full):
+                continue
+            size = int(os.path.getsize(full))
+        except OSError:
+            continue
+        if size <= 0:
+            continue
+        if LOCAL_DOWNLOAD_MARKER in name:
+            preferred = full
+            break
+        candidates.append((size, full))
+    if preferred:
+        return preferred
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def movie_folder_video_bytes(directory: str) -> int:
+    """Total bytes of non-trailer videos in a movie folder."""
+    if not directory or not os.path.isdir(directory):
+        return 0
+    total = 0
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return 0
+    for name in names:
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in VIDEO_EXTENSIONS or _is_trailer_filename(name):
+            continue
+        full = os.path.join(directory, name)
+        try:
+            if os.path.isfile(full):
+                total += int(os.path.getsize(full))
+        except OSError:
+            continue
+    return total
+
+
+def scan_local_movie_downloads(
+    root: str | None = None,
+    *,
+    host: str = "",
+    user: str = "",
+    password: str = "",
+    allow_4k: bool = False,
+    catalog: list | None = None,
+) -> list[dict]:
+    """List local movie videos under the download library with .strm restore info.
+
+    Detects any video container (mkv/mp4/avi/…), not only ``[LOCAL]`` downloads.
+    Trailers are ignored. ``strm_in_catalog`` is true when the title matches the
+    Xtream VOD catalog (or a saved non-proxy URL already exists for restore).
+    """
+    movies_root = os.path.realpath(root or DOWNLOAD_MOVIES_PATH)
+    if not os.path.isdir(movies_root):
+        return []
+
+    vod_catalog = catalog
+    if vod_catalog is None and host and user and password:
+        try:
+            vod_catalog = fetch_vod_catalog(host, user, password)
+        except Exception:
+            vod_catalog = None
+
+    vod_index = group_catalog_versions(vod_catalog) if vod_catalog else {}
+
+    results: list[dict] = []
+    try:
+        folder_names = sorted(os.listdir(movies_root), key=lambda n: n.casefold())
+    except OSError:
+        return []
+
+    for folder_name in folder_names:
+        folder = os.path.join(movies_root, folder_name)
+        if not os.path.isdir(folder):
+            continue
+        local_video = pick_movie_folder_video(folder)
+        if not local_video:
+            continue
+
+        meta = read_movie_strm_url_sidecar(local_video)
+        target_strm = resolve_movie_strm_restore_path(
+            local_video, strm_path=str(meta.get("strm_path") or "") or None
+        )
+        existing = find_strm_files_for_local(local_video)
+
+        xtream_match = None
+        title_key = catalog_title_key(folder_name)
+        pool = list(vod_index.get(title_key) or [])
+        if pool:
+            target_year = extract_title_year(folder_name)
+            if target_year is not None:
+                same_year = [
+                    item
+                    for item in pool
+                    if extract_title_year(str(item.get("name") or "")) == target_year
+                ]
+                if same_year:
+                    pool = same_year
+            xtream_match = pick_best_catalog_item(pool, allow_4k=allow_4k)
+
+        restore_url = resolve_movie_restore_url(local_video)
+        if not restore_url and xtream_match and host and user and password:
+            if xtream_match.get("stream_id") is not None:
+                restore_url = build_movie_stream_url(
+                    host,
+                    user,
+                    password,
+                    xtream_match["stream_id"],
+                    str(xtream_match.get("container_extension") or "mp4"),
+                )
+        strm_exists = bool(
+            (target_strm and os.path.isfile(target_strm))
+            or any(os.path.isfile(p) for p in existing)
+        )
+        in_catalog = bool(xtream_match) or bool(restore_url)
+        size_bytes = movie_folder_video_bytes(folder)
+        results.append(
+            {
+                "title": folder_name,
+                "local_path": os.path.realpath(local_video),
+                "folder": os.path.realpath(folder),
+                "size_bytes": size_bytes,
+                "size_label": human_size(size_bytes),
+                "strm_path": target_strm,
+                "strm_url": restore_url,
+                "strm_in_catalog": in_catalog,
+                "strm_exists": strm_exists,
+                "xtream_name": str((xtream_match or {}).get("name") or ""),
+            }
+        )
+    return results
+
+
 def delete_movie_local_and_restore_strm(
     local_path: str,
     *,
@@ -1499,10 +1769,17 @@ def delete_movie_local_and_restore_strm(
         return result
 
     meta = read_movie_strm_url_sidecar(local_path)
-    remote = (strm_url or str(meta.get("url") or "")).strip()
-    # Sidecar must keep the Xtream URL, not a proxy URL.
-    if remote and "/p/movie/" in remote.lower():
-        remote = ""
+    creds = load_credentials()
+    auto = load_auto_download_config()
+    remote = resolve_movie_restore_url(
+        local_path,
+        strm_url=strm_url,
+        host=str(creds.get("host") or ""),
+        user=str(creds.get("user") or ""),
+        password=str(creds.get("password") or ""),
+        allow_4k=bool(auto.get("allow_4k")),
+        movie_name=os.path.basename(movie_download_dir(local_path)),
+    )
     target_strm = resolve_movie_strm_restore_path(
         local_path, strm_path=strm_path or str(meta.get("strm_path") or "") or None
     )
@@ -1707,9 +1984,29 @@ def _media_server_path_mappings(
     server: str,
     config: dict | None = None,
 ) -> list[tuple[str, str]]:
-    """Pairs of (local_root, server_root) for Emby/Jellyfin path translation."""
+    """Pairs of (local_root, server_root) for Emby/Jellyfin/Silo path translation."""
     cfg = config if isinstance(config, dict) else load_auto_download_config()
     server_key = (server or "").lower()
+    if server_key == "silo":
+        # Silo on this host sees the same library paths. A custom root, when
+        # set, is the container path for both the download and strm trees.
+        series_override = str(cfg.get("silo_series_root") or "").rstrip("/")
+        movies_override = str(cfg.get("silo_movies_root") or "").rstrip("/")
+        return [
+            (DOWNLOAD_TV_PATH.rstrip("/"), series_override or DOWNLOAD_TV_PATH.rstrip("/")),
+            (
+                STRM_OUTPUT_SERIES_PATH.rstrip("/"),
+                series_override or STRM_OUTPUT_SERIES_PATH.rstrip("/"),
+            ),
+            (
+                DOWNLOAD_MOVIES_PATH.rstrip("/"),
+                movies_override or DOWNLOAD_MOVIES_PATH.rstrip("/"),
+            ),
+            (
+                STRM_OUTPUT_MOVIES_PATH.rstrip("/"),
+                movies_override or STRM_OUTPUT_MOVIES_PATH.rstrip("/"),
+            ),
+        ]
     if server_key == "jellyfin":
         series_dst = str(cfg.get("jellyfin_series_root") or "/media/tv").rstrip("/")
         movies_dst = str(cfg.get("jellyfin_movies_root") or "/media/movies").rstrip("/")
@@ -2588,6 +2885,10 @@ def default_auto_download_config() -> dict:
         "jellyfin_url": os.environ.get("JELLYFIN_URL", ""),
         "jellyfin_api_key": os.environ.get("JELLYFIN_API_KEY", ""),
         "jellyfin_username": os.environ.get("JELLYFIN_USERNAME", ""),
+        "silo_enabled": bool(os.environ.get("SILO_URL", "")),
+        "silo_url": os.environ.get("SILO_URL", "http://127.0.0.1:8090"),
+        "silo_api_key": os.environ.get("SILO_API_KEY", ""),
+        "silo_username": os.environ.get("SILO_USERNAME", ""),
         "series_dest": DEFAULT_SERIES_DEST,
         "cooldown_seconds": int(os.environ.get("AUTO_COOLDOWN_SECONDS", "90")),
         "poll_interval_seconds": int(os.environ.get("AUTO_POLL_INTERVAL_SECONDS", "20")),
@@ -2625,6 +2926,7 @@ def default_auto_download_config() -> dict:
             "OPENSUBTITLES_JF_CONFIG",
             "/config/Jellyfin.Plugin.OpenSubtitles.xml",
         ),
+        "deepl_api_key": os.environ.get("DEEPL_API_KEY", ""),
     }
 
 
@@ -2660,6 +2962,10 @@ def _migrate_auto_download_config(merged: dict, raw: dict | None = None) -> dict
     merged.setdefault("jellyfin_url", "")
     merged.setdefault("jellyfin_api_key", "")
     merged.setdefault("jellyfin_username", "")
+    merged.setdefault("silo_enabled", False)
+    merged.setdefault("silo_url", "http://127.0.0.1:8090")
+    merged.setdefault("silo_api_key", "")
+    merged.setdefault("silo_username", "")
     merged.setdefault("allow_4k", False)
     merged.setdefault("continue_download_incomplete", True)
     merged.setdefault("prefetch_playing_strm", False)
@@ -2694,8 +3000,13 @@ def _migrate_auto_download_config(merged: dict, raw: dict | None = None) -> dict
         "opensubtitles_jf_config",
         "/config/Jellyfin.Plugin.OpenSubtitles.xml",
     )
+    merged.setdefault("deepl_api_key", "")
     merged["emby_enabled"] = bool(merged.get("emby_enabled"))
     merged["jellyfin_enabled"] = bool(merged.get("jellyfin_enabled"))
+    merged["silo_enabled"] = bool(merged.get("silo_enabled"))
+    merged["silo_url"] = str(merged.get("silo_url") or "http://127.0.0.1:8090").strip()
+    merged["silo_api_key"] = str(merged.get("silo_api_key") or "").strip()
+    merged["silo_username"] = str(merged.get("silo_username") or "").strip()
     merged["allow_4k"] = bool(merged.get("allow_4k"))
     merged["continue_download_incomplete"] = bool(merged.get("continue_download_incomplete", True))
     merged["prefetch_playing_strm"] = bool(merged.get("prefetch_playing_strm"))
@@ -2720,6 +3031,7 @@ def _migrate_auto_download_config(merged: dict, raw: dict | None = None) -> dict
         merged.get("opensubtitles_api_key") or "gUCLWGoAg2PmyseoTM0INFFVPcDCeDlT"
     ).strip()
     merged["opensubtitles_jf_config"] = str(merged.get("opensubtitles_jf_config") or "").strip()
+    merged["deepl_api_key"] = str(merged.get("deepl_api_key") or "").strip()
     try:
         merged["stream_proxy_port"] = max(
             1, int(merged.get("stream_proxy_port") or 8510)
@@ -3162,6 +3474,88 @@ def fetch_series_catalog(host: str, user: str, password: str) -> list:
     if not isinstance(data, list):
         raise RuntimeError("catalogo serie non valido")
     return exclude_hidden_items(data, "series")
+
+
+_VOD_CATALOG_CACHE: dict[str, tuple[float, list]] = {}
+_VOD_CATALOG_TTL_SEC = 15 * 60
+
+
+def clear_vod_catalog_cache() -> None:
+    _VOD_CATALOG_CACHE.clear()
+
+
+def fetch_vod_catalog(
+    host: str,
+    user: str,
+    password: str,
+    *,
+    force: bool = False,
+) -> list:
+    """Full Xtream VOD catalog (cached ~15 minutes per host/user)."""
+    cache_key = f"{(host or '').rstrip('/')}|{(user or '').strip()}"
+    now = time.time()
+    if not force:
+        cached = _VOD_CATALOG_CACHE.get(cache_key)
+        if cached and (now - cached[0]) < _VOD_CATALOG_TTL_SEC:
+            return cached[1]
+
+    params = {"username": user, "password": password, "action": "get_vod_streams"}
+    data = request_xtream_api(host, params, timeout=180)
+    if not isinstance(data, list):
+        raise RuntimeError("catalogo film non valido")
+    movies = exclude_hidden_items(data, "movies")
+    _VOD_CATALOG_CACHE[cache_key] = (now, movies)
+    return movies
+
+
+def find_xtream_movie(
+    host: str,
+    user: str,
+    password: str,
+    movie_name: str,
+    *,
+    allow_4k: bool = False,
+    catalog: list | None = None,
+) -> dict | None:
+    """Best matching VOD stream for a local/library movie title."""
+    target = catalog_title_key(movie_name)
+    if not target:
+        return None
+    target_year = extract_title_year(movie_name)
+
+    items = catalog if catalog is not None else fetch_vod_catalog(host, user, password)
+    exact = [m for m in items if catalog_title_key(m.get("name", "")) == target]
+    if exact:
+        pool = exact
+    else:
+        partial = [
+            m
+            for m in items
+            if target in catalog_title_key(m.get("name", ""))
+            or catalog_title_key(m.get("name", "")) in target
+        ]
+        if not partial:
+            return None
+        groups: dict[str, list[dict]] = {}
+        for item in partial:
+            key = catalog_title_key(item.get("name", ""))
+            groups.setdefault(key, []).append(item)
+        best_group_key = min(
+            groups.keys(),
+            key=lambda key: abs(len(key) - len(target)),
+        )
+        pool = groups[best_group_key]
+
+    if target_year is not None:
+        same_year = [
+            m
+            for m in pool
+            if extract_title_year(str(m.get("name") or "")) == target_year
+        ]
+        if same_year:
+            pool = same_year
+
+    return pick_best_catalog_item(pool, allow_4k=allow_4k)
 
 
 def get_series_info(host: str, user: str, password: str, series_id: str | int) -> dict | None:

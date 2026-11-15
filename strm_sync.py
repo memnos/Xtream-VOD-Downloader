@@ -484,9 +484,11 @@ def _sync_movie_item(
 ) -> tuple[str, str | None]:
     """Returns (status, strm_path).
 
-    status: created/updated/skipped/excluded/unmatched/probe_failed/rejected.
+    status: created/updated/skipped/excluded/unmatched/probe_failed/rejected/no_italian.
     'rejected' means the existing .strm already points at this stream and the
     panel answered 401/403/404/410. The proxy registry is left unchanged.
+    'no_italian' means a new stream has audio tags that exclude Italian, so
+    the .strm is not written.
     """
     name = str(item.get("name") or "").strip()
     stream_id = item.get("stream_id")
@@ -584,10 +586,49 @@ def _sync_movie_item(
         media = probe_stream_media_info(remote_url, timeout=45)
         if media is None or float(media.get("duration") or 0) <= 0:
             return "probe_failed", strm_path
+        if _stream_lacks_italian_audio(media):
+            return "no_italian", strm_path
 
     if write_strm(strm_path, url):
         return "created", strm_path
     return "skipped", strm_path
+
+
+def _stream_lacks_italian_audio(media: dict) -> bool:
+    """True only when audio language tags conclusively exclude Italian.
+
+    Missing or unknown tags still allow the strm. The next daily sync probes
+    the same catalog item again, so a later Italian track is picked up.
+    """
+    from strm_duration_audit import media_has_italian_audio
+
+    return media_has_italian_audio(media) is False
+
+
+def forced_subtitle_paths(
+    created: list[str],
+    updated: list[str],
+    *,
+    language: str,
+) -> list[str]:
+    """Created movies, plus updated movies that still have no forced sidecar."""
+    from auto_subtitles import has_language_sidecar
+
+    paths: list[str] = []
+    seen: set[str] = set()
+    candidates = list(created)
+    for path in updated:
+        if (
+            path
+            and os.path.isfile(path)
+            and not has_language_sidecar(path, language=language, forced=True)
+        ):
+            candidates.append(path)
+    for path in candidates:
+        if path and path not in seen and os.path.isfile(path):
+            seen.add(path)
+            paths.append(path)
+    return paths
 
 
 def _sync_movie_version_group(
@@ -610,7 +651,9 @@ def _sync_movie_version_group(
     alternate is tried. Existing working STRMs are left alone when update_existing
     is False. When update_existing is on and the URL already in the file is
     explicitly rejected, later versions are tried; if none play, the result is
-    'unavailable' so the caller can remove the file.
+    'unavailable' so the caller can remove the file. A new stream whose audio
+    tags exclude Italian is not written; if that is all that remains, the
+    result is 'no_italian'.
     """
     from discarded_movie_streams import (
         iter_alternate_catalog_versions,
@@ -639,6 +682,7 @@ def _sync_movie_version_group(
 
     saw_unmatched = False
     existing_rejected = False
+    saw_no_italian = False
     last_path: str | None = None
 
     for item in candidates:
@@ -711,6 +755,9 @@ def _sync_movie_version_group(
             if result == "rejected":
                 existing_rejected = True
             continue
+        if result == "no_italian":
+            saw_no_italian = True
+            continue
         if result in {"created", "updated", "removed", "excluded"}:
             return result, path
         if result == "skipped":
@@ -725,6 +772,8 @@ def _sync_movie_version_group(
 
     if existing_rejected and last_path and os.path.isfile(last_path):
         return "unavailable", last_path
+    if saw_no_italian:
+        return "no_italian", last_path
     if saw_unmatched:
         return "unmatched", last_path
     return "skipped", last_path
@@ -840,6 +889,7 @@ def _sync_series_item(
         "unmatched": 0,
         "errors": 0,
         "tmdb_filtered": 0,
+        "created_paths": [],
     }
     series_id = series.get("series_id")
     series_name = str(series.get("name") or "").strip()
@@ -923,6 +973,7 @@ def _sync_series_item(
                 action = "created"
             counts[action] += 1
             if action == "created":
+                counts["created_paths"].append(os.path.realpath(strm_path))
                 try:
                     from strm_seasons import record_touched_season_from_strm
 
@@ -954,6 +1005,7 @@ def _sync_series_m3u_item(
         "unmatched": 0,
         "errors": 0,
         "tmdb_filtered": 0,
+        "created_paths": [],
     }
     series_name = str(series.get("name") or "").strip()
     if not series_name:
@@ -1028,6 +1080,7 @@ def _sync_series_m3u_item(
             action = "created"
         counts[action] += 1
         if action == "created":
+            counts["created_paths"].append(real_path)
             try:
                 from strm_seasons import record_touched_season_from_strm
 
@@ -1299,6 +1352,10 @@ def run_strm_sync(host: str, user: str, password: str, config: dict | None = Non
         expected_movie_paths: set[str] = set()
         expected_episode_paths: set[str] = set()
         created_movie_paths: list[str] = []
+        new_movie_strm_paths: list[str] = []
+        updated_movie_strm_paths: list[str] = []
+        new_episode_strm_paths: list[str] = []
+        movies_no_italian = 0
         movie_version_groups: dict[str, list[dict]] = {}
 
         if config.get("use_tmdb") and tmdb_client is None:
@@ -1421,12 +1478,19 @@ def run_strm_sync(host: str, user: str, password: str, config: dict | None = Non
                 if result == "created":
                     status["movies_created"] += 1
                     if strm_path and os.path.isfile(strm_path):
-                        created_movie_paths.append(os.path.realpath(strm_path))
+                        real_strm = os.path.realpath(strm_path)
+                        created_movie_paths.append(real_strm)
+                        new_movie_strm_paths.append(real_strm)
                 elif result == "updated":
                     status["movies_updated"] += 1
                     if strm_path and os.path.isfile(strm_path):
+                        real_strm = os.path.realpath(strm_path)
                         # Treat URL updates as new streams that need media audit/push.
-                        created_movie_paths.append(os.path.realpath(strm_path))
+                        created_movie_paths.append(real_strm)
+                        updated_movie_strm_paths.append(real_strm)
+                elif result == "no_italian":
+                    movies_no_italian += 1
+                    status["movies_skipped"] += 1
                 elif result == "removed":
                     status["movies_removed"] += 1
                 elif result == "excluded":
@@ -1449,6 +1513,34 @@ def run_strm_sync(host: str, user: str, password: str, config: dict | None = Non
                     f"({format_elapsed_seconds(status['movies_elapsed_sec'])})"
                 ),
             )
+            if movies_no_italian:
+                _append_log(
+                    status,
+                    (
+                        f"Movies left for the next sync, no Italian audio: "
+                        f"{movies_no_italian}"
+                    ),
+                )
+            subtitle_language = str(
+                load_auto_download_config().get("auto_subs_language") or "it"
+            )
+            subtitle_movie_paths = forced_subtitle_paths(
+                new_movie_strm_paths,
+                updated_movie_strm_paths,
+                language=subtitle_language,
+            )
+            if subtitle_movie_paths:
+                try:
+                    from auto_subtitles import queue_forced_subs_for_new_movies
+
+                    note = queue_forced_subs_for_new_movies(
+                        subtitle_movie_paths,
+                        language=subtitle_language,
+                    )
+                    if note:
+                        _append_log(status, note)
+                except Exception as exc:
+                    _append_log(status, f"Forced subtitle search not started: {exc}")
             if created_movie_paths:
                 # Dedupe while preserving order.
                 created_movie_paths = list(dict.fromkeys(created_movie_paths))
@@ -1593,6 +1685,7 @@ def run_strm_sync(host: str, user: str, password: str, config: dict | None = Non
                 status["episodes_created"] += counts["created"]
                 status["episodes_updated"] += counts["updated"]
                 status["episodes_skipped"] += counts["skipped"]
+                new_episode_strm_paths.extend(counts.get("created_paths") or [])
                 status["episodes_removed"] += counts.get("removed", 0)
                 status["episodes_tmdb_filtered"] += counts.get("tmdb_filtered", 0)
                 status["series_excluded"] += counts["excluded"]
@@ -1632,6 +1725,21 @@ def run_strm_sync(host: str, user: str, password: str, config: dict | None = Non
                         f"{status['episodes_tmdb_filtered']} phantom episodes skipped/removed"
                     ),
                 )
+            if new_episode_strm_paths:
+                try:
+                    from auto_subtitles import queue_forced_subs_for_new_movies
+
+                    note = queue_forced_subs_for_new_movies(
+                        list(dict.fromkeys(new_episode_strm_paths)),
+                        language=str(
+                            load_auto_download_config().get("auto_subs_language") or "it"
+                        ),
+                        kind="episodes",
+                    )
+                    if note:
+                        _append_log(status, note)
+                except Exception as exc:
+                    _append_log(status, f"Forced subtitle search not started: {exc}")
             if series_source in {"m3u", "m3u_api_fallback"}:
                 _append_log(
                     status,

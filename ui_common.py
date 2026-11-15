@@ -587,11 +587,21 @@ def test_media_server_connection(server: str, url: str, api_key: str, username: 
     username = username.strip()
     if not url or not api_key or not username:
         return False, t("server_test_missing_fields")
-    client = MediaServerClient(url, api_key, server)
+    if server == "silo":
+        from silo_client import SiloClient
+
+        client = SiloClient(url, api_key)
+    else:
+        client = MediaServerClient(url, api_key, server)
     return client.test_connection(username)
 
 def show_media_server_test_result(server: str, ok: bool, detail: str) -> None:
-    label = t("emby_section") if server == "emby" else t("jellyfin_section")
+    labels = {
+        "emby": "emby_section",
+        "jellyfin": "jellyfin_section",
+        "silo": "silo_section",
+    }
+    label = t(labels.get(server, "jellyfin_section"))
     if ok:
         st.success(t("server_test_ok", server=label, detail=detail))
     else:
@@ -611,6 +621,7 @@ def render_server_traffic_lights(config: dict, watcher_running: bool, *, compact
     servers = (
         ("emby", "emby_section"),
         ("jellyfin", "jellyfin_section"),
+        ("silo", "silo_section"),
     )
     if compact:
         lines = []
@@ -625,11 +636,8 @@ def render_server_traffic_lights(config: dict, watcher_running: bool, *, compact
 
     with st.container(border=True):
         st.markdown(f"### {t('server_monitor_title')}")
-        col_emby, col_jelly = st.columns(2)
-        for col, server, label_key in (
-            (col_emby, "emby", "emby_section"),
-            (col_jelly, "jellyfin", "jellyfin_section"),
-        ):
+        columns = st.columns(len(servers))
+        for col, (server, label_key) in zip(columns, servers):
             active = is_server_monitored(config, server, watcher_running)
             light = "🟢" if active else "🔴"
             status_label = t("server_monitor_on") if active else t("server_monitor_off")

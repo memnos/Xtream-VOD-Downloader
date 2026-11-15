@@ -149,6 +149,35 @@ def _decode_subtitle_bytes(payload: bytes) -> str:
     return payload.decode("utf-8", errors="replace")
 
 
+def opensubtitles_search_params(
+    *,
+    tmdb_id: int,
+    language: str,
+    forced: bool | None,
+    season: int | None = None,
+    episode: int | None = None,
+) -> dict[str, object]:
+    """OpenSubtitles search query. Episodes use parent_tmdb_id; movies use tmdb_id."""
+    params: dict[str, object] = {
+        "languages": language,
+        "order_by": "download_count",
+        "order_direction": "desc",
+    }
+    if season and episode:
+        params["parent_tmdb_id"] = int(tmdb_id)
+        params["season_number"] = int(season)
+        params["episode_number"] = int(episode)
+        params["type"] = "episode"
+    else:
+        params["tmdb_id"] = int(tmdb_id)
+        params["type"] = "movie"
+    if forced is True:
+        params["foreign_parts_only"] = "only"
+    elif forced is False:
+        params["foreign_parts_only"] = "exclude"
+    return params
+
+
 def search_episode_subtitles(
     *,
     token: str,
@@ -159,19 +188,42 @@ def search_episode_subtitles(
     languages: str = "it",
     foreign_parts_only: bool | None = None,
 ) -> list[dict]:
-    params: dict[str, object] = {
-        "languages": languages,
-        "parent_tmdb_id": int(tmdb_id),
-        "season_number": int(season),
-        "episode_number": int(episode),
-        "type": "episode",
-        "order_by": "download_count",
-        "order_direction": "desc",
-    }
-    if foreign_parts_only is True:
-        params["foreign_parts_only"] = "only"
-    elif foreign_parts_only is False:
-        params["foreign_parts_only"] = "exclude"
+    params = opensubtitles_search_params(
+        tmdb_id=tmdb_id,
+        language=languages,
+        forced=foreign_parts_only,
+        season=season,
+        episode=episode,
+    )
+    url = f"{OPENSUBTITLES_BASE}/subtitles?{urlencode(params)}"
+    data = _http_json(
+        "GET",
+        url,
+        headers={
+            "Api-Key": api_key,
+            "Authorization": f"Bearer {token}",
+            "User-Agent": DEFAULT_OPENSUBTITLES_UA,
+        },
+    )
+    if not isinstance(data, dict):
+        return []
+    rows = data.get("data")
+    return rows if isinstance(rows, list) else []
+
+
+def search_movie_subtitles(
+    *,
+    token: str,
+    api_key: str,
+    tmdb_id: int,
+    languages: str = "it",
+    foreign_parts_only: bool | None = None,
+) -> list[dict]:
+    params = opensubtitles_search_params(
+        tmdb_id=tmdb_id,
+        language=languages,
+        forced=foreign_parts_only,
+    )
     url = f"{OPENSUBTITLES_BASE}/subtitles?{urlencode(params)}"
     data = _http_json(
         "GET",
@@ -252,6 +304,110 @@ def pick_best_italian_subtitle(entries: list[dict], *, prefer_forced: bool = Tru
     return pool[0], False
 
 
+def _download_forced_for_language(
+    *,
+    token: str,
+    api_key: str,
+    tmdb_id: int,
+    language: str,
+    season: int | None = None,
+    episode: int | None = None,
+) -> str | None:
+    """Download a forced / foreign-parts-only subtitle, or None if missing."""
+    is_episode = season is not None and episode is not None
+    if is_episode:
+        entries = search_episode_subtitles(
+            token=token,
+            api_key=api_key,
+            tmdb_id=tmdb_id,
+            season=int(season or 0),
+            episode=int(episode or 0),
+            languages=language,
+            foreign_parts_only=True,
+        )
+    else:
+        entries = search_movie_subtitles(
+            token=token,
+            api_key=api_key,
+            tmdb_id=tmdb_id,
+            languages=language,
+            foreign_parts_only=True,
+        )
+    pick = choose_subtitle_entry(entries, forced=True, trust_query=True)
+    file_id = _pick_file_id(pick) if pick else None
+    if not file_id:
+        return None
+    return download_subtitle_file(token=token, api_key=api_key, file_id=file_id)
+
+
+def _forced_fallback_message(label: str, err: str) -> str:
+    """Human-readable reason when IT forced is missing and EN→IT did not succeed."""
+    reasons = {
+        "deepl_missing": (
+            f"{label}: nessun forced IT; chiave DeepL Free assente "
+            "(EN/FPO non tradotto)"
+        ),
+        "en_not_found": f"{label}: nessun forced IT né EN/FPO su OpenSubtitles",
+        "en_download_failed": f"{label}: download forced EN/FPO fallito",
+        "deepl_quota": f"{label}: quota DeepL Free esaurita (forced EN non tradotto)",
+        "deepl_failed": f"{label}: traduzione DeepL del forced EN fallita",
+        "deepl_empty": f"{label}: DeepL ha restituito un sottotitolo vuoto",
+    }
+    return reasons.get(err, f"{label}: fallback EN→IT non riuscito ({err})")
+
+
+def translate_english_forced_to_italian(
+    *,
+    token: str,
+    api_key: str,
+    tmdb_id: int,
+    config: dict | None = None,
+    season: int | None = None,
+    episode: int | None = None,
+    log: LogFn | None = None,
+    label: str = "",
+) -> tuple[str | None, str]:
+    """Search EN forced/FPO, translate with DeepL Free, return (srt_text, error)."""
+    from deepl_translate import (
+        DeepLError,
+        DeepLQuotaExhausted,
+        load_deepl_api_key,
+        translate_srt,
+    )
+
+    tag = label or "Sottotitoli"
+    deepl_key = load_deepl_api_key(config)
+    if not deepl_key:
+        return None, "deepl_missing"
+    _log(log, f"{tag}: forced IT assente, cerco EN/FPO su OpenSubtitles")
+    try:
+        en_text = _download_forced_for_language(
+            token=token,
+            api_key=api_key,
+            tmdb_id=tmdb_id,
+            language="en",
+            season=season,
+            episode=episode,
+        )
+    except (HTTPError, URLError, RuntimeError, OSError, TimeoutError, ValueError) as exc:
+        _log(log, f"{tag}: OpenSubtitles EN forced: {exc}")
+        return None, "en_download_failed"
+    if not en_text:
+        return None, "en_not_found"
+    _log(log, f"{tag}: trovato forced EN/FPO, traduco con DeepL Free")
+    try:
+        it_text = translate_srt(en_text, api_key=deepl_key, log=log)
+    except DeepLQuotaExhausted as exc:
+        _log(log, f"{tag}: {exc}")
+        return None, "deepl_quota"
+    except DeepLError as exc:
+        _log(log, f"{tag}: DeepL: {exc}")
+        return None, "deepl_failed"
+    if not it_text.strip():
+        return None, "deepl_empty"
+    return it_text, ""
+
+
 def tmdb_id_from_folder(series_folder: str) -> int | None:
     match = _TMDB_RE.search(series_folder or "")
     if not match:
@@ -281,9 +437,34 @@ def resolve_strm_path(
     return None
 
 
+_VIDEO_SUFFIXES = (
+    ".strm",
+    ".mkv",
+    ".mp4",
+    ".avi",
+    ".m4v",
+    ".ts",
+    ".m2ts",
+    ".wmv",
+    ".mov",
+    ".mpg",
+    ".mpeg",
+)
+
+
+def media_path_base(path: str) -> str:
+    """Path without the video or strm extension, so a sidecar sits beside the file."""
+    lower = (path or "").lower()
+    for ext in _VIDEO_SUFFIXES:
+        if lower.endswith(ext):
+            return path[: -len(ext)]
+    root, _ext = os.path.splitext(path)
+    return root
+
+
 def sidecar_paths_for_strm(strm_path: str, *, forced: bool) -> list[str]:
-    """Possible sidecar names Jellyfin accepts next to a .strm."""
-    base = strm_path[:-5] if strm_path.lower().endswith(".strm") else strm_path
+    """Possible sidecar names Jellyfin accepts next to a strm or local video."""
+    base = media_path_base(strm_path)
     if forced:
         return [
             f"{base}.ita.forced.srt",
@@ -311,6 +492,110 @@ def has_italian_sidecar(strm_path: str, *, accept_full: bool = True) -> tuple[bo
                 has_full = True
                 break
     return (has_forced or has_full), has_forced
+
+
+def language_tags(language: str) -> tuple[str, ...]:
+    """Filename tags for a subtitle language. Italian keeps the existing ita/it names."""
+    lang = (language or "it").strip().lower()
+    if lang in {"it", "ita", "italian"}:
+        return ("ita", "it")
+    return (lang,)
+
+
+def sidecar_paths_for_language(strm_path: str, *, language: str, forced: bool) -> list[str]:
+    tags = language_tags(language)
+    if tags[0] == "ita":
+        return sidecar_paths_for_strm(strm_path, forced=forced)
+    base = media_path_base(strm_path)
+    tag = tags[0]
+    if forced:
+        return [f"{base}.{tag}.forced.srt"]
+    return [f"{base}.{tag}.srt"]
+
+
+def _existing_sidecar(strm_path: str, *, language: str, forced: bool) -> str:
+    for path in sidecar_paths_for_language(strm_path, language=language, forced=forced):
+        if os.path.isfile(path) and os.path.getsize(path) > 20:
+            return path
+    return ""
+
+
+def has_language_sidecar(strm_path: str, *, language: str, forced: bool) -> bool:
+    return bool(_existing_sidecar(strm_path, language=language, forced=forced))
+
+
+def subtitle_saved_at(path: str) -> str:
+    """Local time of the subtitle file, Europe/Rome."""
+    if not path or not os.path.isfile(path):
+        return ""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    stamp = datetime.fromtimestamp(os.path.getmtime(path), ZoneInfo("Europe/Rome"))
+    return stamp.strftime("%d/%m/%Y %H:%M")
+
+
+def subtitle_result_row(info: dict, *, label: str = "") -> dict:
+    path = str(info.get("path") or "")
+    if info.get("ok") and info.get("skipped"):
+        outcome = "existing"
+    elif info.get("ok"):
+        outcome = "saved"
+    else:
+        outcome = "missing"
+    return {
+        "language": str(info.get("language") or ""),
+        "forced": bool(info.get("forced")),
+        "outcome": outcome,
+        "name": os.path.basename(path) if path else "",
+        "saved_at": subtitle_saved_at(path),
+        "label": label,
+    }
+
+
+def write_language_sidecar(strm_path: str, text: str, *, language: str, forced: bool) -> str:
+    if language_tags(language)[0] == "ita":
+        return write_sidecar(strm_path, text, forced=forced)
+    target = sidecar_paths_for_language(strm_path, language=language, forced=forced)[0]
+    os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+    body = text if text.endswith("\n") else text + "\n"
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    return target
+
+
+def tmdb_id_for_strm(strm_path: str, *, episode: bool) -> int | None:
+    """Movie id sits on the strm folder. Episode id sits on the series folder above the season."""
+    folder = os.path.basename(os.path.dirname(strm_path))
+    if episode:
+        return tmdb_id_from_folder(series_folder_from_path(strm_path)) or tmdb_id_from_folder(folder)
+    return tmdb_id_from_folder(folder) or tmdb_id_from_folder(os.path.basename(strm_path))
+
+
+def choose_subtitle_entry(
+    entries: list[dict], *, forced: bool, trust_query: bool = False
+) -> dict | None:
+    """Pick a forced or a full subtitle. A forced request never accepts a full file.
+
+    trust_query is for a search that already asked OpenSubtitles for only forced
+    or only full subtitles, where a hit may omit the foreign_parts_only flag.
+    """
+    if not entries:
+        return None
+    if forced:
+        forced_entries = [entry for entry in entries if _is_forced_entry(entry)]
+        if forced_entries:
+            return forced_entries[0]
+        return entries[0] if trust_query else None
+    normal = []
+    for entry in entries:
+        attrs = entry.get("attributes") if isinstance(entry, dict) else {}
+        if isinstance(attrs, dict) and attrs.get("hearing_impaired"):
+            continue
+        if _is_forced_entry(entry):
+            continue
+        normal.append(entry)
+    return normal[0] if normal else None
 
 
 def write_sidecar(strm_path: str, text: str, *, forced: bool) -> str:
@@ -769,7 +1054,34 @@ def ensure_italian_subs_for_strm(
                     foreign_parts_only=True,
                 )
             pick, is_forced = pick_best_italian_subtitle(entries, prefer_forced=True)
-            if not pick:
+            text = ""
+            source = "opensubtitles"
+            if pick:
+                file_id = _pick_file_id(pick)
+                if file_id:
+                    text = download_subtitle_file(
+                        token=token, api_key=api_key, file_id=file_id
+                    )
+            # IT forced missing → EN forced/FPO → DeepL Free → .ita.forced.srt
+            if not text and prefer_forced and language in {"it", "ita"}:
+                ep_label = f"Sottotitoli S{season:02d}E{episode:02d}"
+                translated, err = translate_english_forced_to_italian(
+                    token=token,
+                    api_key=api_key,
+                    tmdb_id=tid,
+                    config=cfg,
+                    season=season,
+                    episode=episode,
+                    log=log,
+                    label=ep_label,
+                )
+                if translated:
+                    text = translated
+                    is_forced = True
+                    source = "opensubtitles+deepl"
+                elif err:
+                    _log(log, _forced_fallback_message(ep_label, err))
+            if not text:
                 entries = search_episode_subtitles(
                     token=token,
                     api_key=api_key,
@@ -781,9 +1093,13 @@ def ensure_italian_subs_for_strm(
                 )
                 pick, is_forced = pick_best_italian_subtitle(entries, prefer_forced=False)
                 is_forced = False
-            file_id = _pick_file_id(pick) if pick else None
-            if file_id:
-                text = download_subtitle_file(token=token, api_key=api_key, file_id=file_id)
+                file_id = _pick_file_id(pick) if pick else None
+                if file_id:
+                    text = download_subtitle_file(
+                        token=token, api_key=api_key, file_id=file_id
+                    )
+                    source = "opensubtitles"
+            if text:
                 # If we already have full and this isn't forced, skip overwrite.
                 if not is_forced and has_any:
                     result["ok"] = True
@@ -808,11 +1124,12 @@ def ensure_italian_subs_for_strm(
                 result["ok"] = True
                 result["forced"] = bool(is_forced)
                 result["path"] = out
-                result["source"] = "opensubtitles"
+                result["source"] = source
+                via = " (EN→IT DeepL)" if source == "opensubtitles+deepl" else ""
                 _log(
                     log,
                     f"Sottotitoli S{season:02d}E{episode:02d}: "
-                    f"{'forced' if is_forced else 'full'} IT → {os.path.basename(out)}",
+                    f"{'forced' if is_forced else 'full'} IT{via} → {os.path.basename(out)}",
                 )
                 if client is not None and item_id:
                     if jellyfin_attach_subtitle_file(
@@ -927,6 +1244,19 @@ def ensure_italian_subs_for_strm(
     return result
 
 
+def episode_in_scope(
+    ep_season: int,
+    ep_num: int,
+    *,
+    season: int,
+    from_episode: int,
+    all_seasons: bool,
+) -> bool:
+    if all_seasons:
+        return True
+    return int(ep_season) == int(season) and int(ep_num) >= int(from_episode)
+
+
 def ensure_season_subtitles(
     client,
     *,
@@ -939,6 +1269,7 @@ def ensure_season_subtitles(
     language: str = "it",
     log: LogFn | None = None,
     verify_playback_info: bool = True,
+    all_seasons: bool = False,
 ) -> dict:
     summary = {"ok": 0, "skipped": 0, "failed": 0, "episodes": []}
     try:
@@ -952,7 +1283,13 @@ def ensure_season_subtitles(
             ep_num = int(ep.get("IndexNumber"))
         except (TypeError, ValueError):
             continue
-        if ep_season != int(season) or ep_num < int(from_episode):
+        if not episode_in_scope(
+            ep_season,
+            ep_num,
+            season=season,
+            from_episode=from_episode,
+            all_seasons=all_seasons,
+        ):
             continue
         item_id = str(ep.get("Id") or "")
         media_path = str(ep.get("Path") or "")
@@ -1011,3 +1348,626 @@ def schedule_subs_job(key: str, target, *args, **kwargs) -> bool:
 
     threading.Thread(target=_runner, daemon=True, name=f"auto-subs-{key[:40]}").start()
     return True
+
+
+_movie_queue: list[str] = []
+_movie_queue_lock = threading.Lock()
+_request_lock = threading.Lock()
+
+
+def fetch_subtitle_variant(
+    strm_path: str,
+    *,
+    language: str,
+    forced: bool,
+    season: int | None = None,
+    episode: int | None = None,
+    tmdb_id: int | None = None,
+    config: dict | None = None,
+    log: LogFn | None = None,
+) -> dict:
+    """Download one subtitle variant next to a strm. Forced requests ignore full subtitles."""
+    result = {
+        "ok": False,
+        "skipped": False,
+        "forced": bool(forced),
+        "language": language,
+        "path": "",
+        "error": "",
+    }
+    if not strm_path or not os.path.isfile(strm_path):
+        result["error"] = "strm_missing"
+        return result
+    if has_language_sidecar(strm_path, language=language, forced=forced):
+        result["ok"] = True
+        result["skipped"] = True
+        result["path"] = _existing_sidecar(strm_path, language=language, forced=forced)
+        return result
+    is_episode = season is not None and episode is not None
+    tid = tmdb_id or tmdb_id_for_strm(strm_path, episode=is_episode)
+    if not tid:
+        result["error"] = "no_tmdb"
+        _log(log, f"Sottotitoli {os.path.basename(strm_path)}: tmdbid assente")
+        return result
+    creds = load_opensubtitles_credentials(config or {})
+    if not creds.get("username") or not creds.get("password"):
+        result["error"] = "no_credentials"
+        return result
+    label = f"S{int(season):02d}E{int(episode):02d}" if is_episode else os.path.basename(strm_path)
+    kind = "forced" if forced else "full"
+    try:
+        token = opensubtitles_login(creds)
+        api_key = creds["api_key"]
+        if is_episode:
+            entries = search_episode_subtitles(
+                token=token,
+                api_key=api_key,
+                tmdb_id=tid,
+                season=int(season or 0),
+                episode=int(episode or 0),
+                languages=language,
+                foreign_parts_only=forced,
+            )
+        else:
+            entries = search_movie_subtitles(
+                token=token,
+                api_key=api_key,
+                tmdb_id=tid,
+                languages=language,
+                foreign_parts_only=forced,
+            )
+        pick = choose_subtitle_entry(entries, forced=forced, trust_query=True)
+        file_id = _pick_file_id(pick) if pick else None
+        text = ""
+        source = "opensubtitles"
+        if file_id:
+            text = download_subtitle_file(token=token, api_key=api_key, file_id=file_id)
+        # Forced IT missing → EN forced/FPO translated with DeepL Free.
+        if (
+            not text
+            and forced
+            and language in {"it", "ita"}
+        ):
+            job_label = f"Sottotitoli {label}"
+            translated, err = translate_english_forced_to_italian(
+                token=token,
+                api_key=api_key,
+                tmdb_id=tid,
+                config=config or {},
+                season=season,
+                episode=episode,
+                log=log,
+                label=job_label,
+            )
+            if translated:
+                text = translated
+                source = "opensubtitles+deepl"
+            elif err:
+                _log(log, _forced_fallback_message(job_label, err))
+                if err == "deepl_quota":
+                    result["error"] = "deepl_quota"
+                    return result
+        if not text:
+            result["error"] = "not_found"
+            if not (forced and language in {"it", "ita"}):
+                _log(log, f"Sottotitoli {label}: nessun {language} {kind}")
+            return result
+        out = write_language_sidecar(strm_path, text, language=language, forced=forced)
+        result["ok"] = True
+        result["path"] = out
+        result["source"] = source
+        via = " (EN→IT DeepL)" if source == "opensubtitles+deepl" else ""
+        _log(
+            log,
+            f"Sottotitoli {label}: {language} {kind}{via} → {os.path.basename(out)}",
+        )
+        return result
+    except (HTTPError, URLError, RuntimeError, OSError, TimeoutError, ValueError) as exc:
+        result["error"] = str(exc)
+        _log(log, f"Sottotitoli {label}: {exc}")
+        return result
+
+
+_drain_thread_lock = threading.Lock()
+_drain_thread_started = False
+
+
+def subtitle_jobs_log_path() -> str:
+    from core import DATA_DIR
+
+    return os.path.join(DATA_DIR, "subtitle_jobs.log")
+
+
+def _append_job_log(message: str) -> None:
+    path = subtitle_jobs_log_path()
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(message.rstrip() + "\n")
+    except OSError:
+        pass
+
+
+def read_subtitle_jobs_log(*, limit: int = 80) -> list[str]:
+    """Latest lines from the overnight / queued forced-subtitle job log."""
+    path = subtitle_jobs_log_path()
+    if not path or not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            lines = [ln.rstrip("\n") for ln in fh.readlines()]
+    except OSError:
+        return []
+    if limit <= 0:
+        return lines
+    return lines[-limit:]
+
+
+def _drain_new_movie_forced(language: str) -> None:
+    from core import load_auto_download_config
+
+    global _drain_thread_started
+    try:
+        while True:
+            with _movie_queue_lock:
+                strm_path = _movie_queue.pop(0) if _movie_queue else ""
+            if not strm_path:
+                return
+            config = load_auto_download_config()
+            fetch_subtitle_variant(
+                strm_path,
+                language=language,
+                forced=True,
+                config=config,
+                log=_append_job_log,
+                **subtitle_job_kwargs(strm_path),
+            )
+            time.sleep(0.4)
+    finally:
+        with _drain_thread_lock:
+            _drain_thread_started = False
+        with _movie_queue_lock:
+            more = bool(_movie_queue)
+        if more:
+            _ensure_movie_drain(language)
+
+
+def _ensure_movie_drain(language: str) -> bool:
+    global _drain_thread_started
+    with _drain_thread_lock:
+        if _drain_thread_started:
+            return False
+        _drain_thread_started = True
+    threading.Thread(
+        target=_drain_new_movie_forced,
+        args=(language,),
+        daemon=True,
+        name="auto-subs-new-movies",
+    ).start()
+    return True
+
+
+def subtitle_job_kwargs(strm_path: str) -> dict:
+    """Season and episode when the path is an episode strm. Movies stay unscoped."""
+    from core import parse_episode_numbers_from_path
+
+    numbers = parse_episode_numbers_from_path(strm_path)
+    if not numbers:
+        return {}
+    season, episode = numbers
+    return {"season": season, "episode": episode}
+
+
+def queue_forced_subs_for_new_movies(
+    paths: list[str], *, language: str = "it", kind: str = "movies"
+) -> str:
+    """Queue a forced-only search for strm files that were just created or updated."""
+    label = "episodes" if kind == "episodes" else "movies"
+    unique = []
+    seen = set()
+    for path in paths:
+        if path and path not in seen and os.path.isfile(path):
+            seen.add(path)
+            unique.append(path)
+    if not unique:
+        return ""
+    from core import load_auto_download_config
+
+    config = load_auto_download_config()
+    creds = load_opensubtitles_credentials(config)
+    if not creds.get("username") or not creds.get("password"):
+        return (
+            f"Forced subtitle search skipped for {len(unique)} new {label}: "
+            "OpenSubtitles credentials missing"
+        )
+    with _movie_queue_lock:
+        queued = set(_movie_queue)
+        for path in unique:
+            if path not in queued:
+                _movie_queue.append(path)
+                queued.add(path)
+    if not _ensure_movie_drain(language):
+        return f"Forced subtitle search already running; added {len(unique)} new {label}"
+    return f"Forced subtitle search queued for {len(unique)} new {label}"
+
+
+_LIBRARY_PREFIXES = (
+    "/mnt/union/Movies",
+    "/mnt/wsl/union/Movies",
+    "/mnt/wsl/HDD1/Movies",
+    "/mnt/union/Serie_Tv",
+    "/mnt/wsl/union/Serie_Tv",
+    "/mnt/wsl/HDD1/Serie_Tv",
+)
+
+
+def resolve_server_media_path(
+    path: str,
+    *,
+    server: str,
+    config: dict | None = None,
+    movie_roots: tuple[str, ...] | None = None,
+    series_roots: tuple[str, ...] | None = None,
+) -> str | None:
+    """Turn a Silo/Emby/Jellyfin path into a file this container can write beside.
+
+    Silo stores the union path (`/mnt/union/...`). The container mounts the local
+    branch and the strm branch separately, so the same relative path is tried
+    on both.
+    """
+    from core import (
+        DOWNLOAD_MOVIES_PATH,
+        DOWNLOAD_TV_PATH,
+        STRM_OUTPUT_MOVIES_PATH,
+        STRM_OUTPUT_SERIES_PATH,
+    )
+
+    raw = (path or "").replace("\\", "/")
+    if raw and os.path.isfile(raw):
+        return raw
+    mapped = map_media_server_path_to_local(raw, server=server, config=config)
+    if mapped and os.path.isfile(mapped):
+        return mapped
+    movies = movie_roots or (DOWNLOAD_MOVIES_PATH, STRM_OUTPUT_MOVIES_PATH)
+    series = series_roots or (DOWNLOAD_TV_PATH, STRM_OUTPUT_SERIES_PATH)
+    for prefix in _LIBRARY_PREFIXES:
+        if raw != prefix and not raw.startswith(prefix + "/"):
+            continue
+        rel = raw[len(prefix) :]
+        roots = movies if prefix.rstrip("/").endswith("Movies") else series
+        for root in roots:
+            candidate = root.rstrip("/") + rel
+            if os.path.isfile(candidate):
+                return candidate
+    return None
+
+
+def search_enabled_libraries(
+    query: str,
+    *,
+    kind: str,
+    config: dict | None = None,
+    limit: int = 20,
+) -> list[dict]:
+    """Titles from the libraries of the enabled Emby, Jellyfin and Silo servers."""
+    from core import load_auto_download_config
+
+    cfg = config if config is not None else load_auto_download_config()
+    servers = (
+        ("silo", "silo_enabled", "silo_url", "silo_api_key", "silo_username", "Silo"),
+        ("jellyfin", "jellyfin_enabled", "jellyfin_url", "jellyfin_api_key", "jellyfin_username", "Jellyfin"),
+        ("emby", "emby_enabled", "emby_url", "emby_api_key", "emby_username", "Emby"),
+    )
+    hits: list[dict] = []
+    for server, enabled, url_key, key_key, user_key, label in servers:
+        if not cfg.get(enabled):
+            continue
+        url = str(cfg.get(url_key) or "").strip()
+        api_key = str(cfg.get(key_key) or "").strip()
+        if not url or not api_key:
+            continue
+        try:
+            if server == "silo":
+                from silo_client import SiloClient
+
+                rows = SiloClient(url, api_key).search_library(kind, query, limit)
+            else:
+                from emby_watcher import MediaServerClient
+
+                client = MediaServerClient(url, api_key, server)
+                user_id = client.resolve_user_id(str(cfg.get(user_key) or ""))
+                if not user_id:
+                    continue
+                rows = client.search_library(user_id, kind, query, limit)
+        except Exception:
+            continue
+        for row in rows:
+            item_id = str(row.get("Id") or "").strip()
+            title = str(row.get("Name") or "").strip()
+            if not item_id or not title:
+                continue
+            hits.append(
+                {
+                    "server": server,
+                    "server_label": label,
+                    "id": item_id,
+                    "title": title,
+                    "year": row.get("Year") or "",
+                }
+            )
+    return hits
+
+
+def library_media_targets(
+    *,
+    server: str,
+    item_id: str,
+    kind: str,
+    config: dict,
+) -> list[tuple[str, int | None, int | None]]:
+    """Local strm or video files for one library movie or every episode of a series."""
+    url_key = f"{server}_url"
+    key_key = f"{server}_api_key"
+    user_key = f"{server}_username"
+    url = str(config.get(url_key) or "").strip()
+    api_key = str(config.get(key_key) or "").strip()
+    if not url or not api_key or not item_id:
+        return []
+    if server == "silo":
+        from silo_client import SiloClient
+
+        client = SiloClient(url, api_key)
+        user_id = ""
+    else:
+        from emby_watcher import MediaServerClient
+
+        client = MediaServerClient(url, api_key, server)
+        user_id = client.resolve_user_id(str(config.get(user_key) or "")) or ""
+        if not user_id:
+            return []
+    targets: list[tuple[str, int | None, int | None]] = []
+    if kind == "series":
+        try:
+            episodes = client.get_series_episodes(user_id, item_id)
+        except Exception:
+            return []
+        for episode in episodes:
+            local = resolve_server_media_path(
+                str(episode.get("Path") or ""),
+                server=server,
+                config=config,
+            )
+            if not local:
+                continue
+            try:
+                season = int(episode.get("ParentIndexNumber"))
+                number = int(episode.get("IndexNumber"))
+            except (TypeError, ValueError):
+                season, number = None, None
+            targets.append((local, season, number))
+        return targets
+    try:
+        item = client.get_item(user_id, item_id, "Path")
+    except Exception:
+        return []
+    local = resolve_server_media_path(str((item or {}).get("Path") or ""), server=server, config=config)
+    if local:
+        targets.append((local, None, None))
+    return targets
+
+
+def list_title_folders(root: str) -> list[str]:
+    if not root or not os.path.isdir(root):
+        return []
+    names = []
+    for name in os.listdir(root):
+        if os.path.isdir(os.path.join(root, name)):
+            names.append(name)
+    names.sort(key=str.casefold)
+    return names
+
+
+def movie_strm_in_folder(folder: str) -> str | None:
+    if not os.path.isdir(folder):
+        return None
+    for name in sorted(os.listdir(folder)):
+        if name.lower().endswith(".strm"):
+            return os.path.join(folder, name)
+    return None
+
+
+def episode_strms_in_series(folder: str) -> list[tuple[str, int, int]]:
+    found: list[tuple[str, int, int]] = []
+    if not os.path.isdir(folder):
+        return found
+    for dirpath, _dirs, files in os.walk(folder):
+        for name in files:
+            if not name.lower().endswith(".strm"):
+                continue
+            match = _SE_RE.search(name)
+            if not match:
+                continue
+            found.append(
+                (os.path.join(dirpath, name), int(match.group(1)), int(match.group(2)))
+            )
+    found.sort(key=lambda item: (item[1], item[2], item[0]))
+    return found
+
+
+def subtitle_request_status_path() -> str:
+    from core import DATA_DIR
+
+    return os.path.join(DATA_DIR, "subtitle_request.json")
+
+
+def load_subtitle_request_status() -> dict:
+    path = subtitle_request_status_path()
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_subtitle_request_status(status: dict) -> None:
+    path = subtitle_request_status_path()
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(status, fh, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def _append_subtitle_log(message: str) -> None:
+    with _request_lock:
+        status = load_subtitle_request_status()
+        lines = list(status.get("log") or [])
+        lines.append(message)
+        status["log"] = lines[-40:]
+        _write_subtitle_request_status(status)
+
+
+def run_subtitle_request(
+    *,
+    kind: str,
+    folder: str = "",
+    languages: list[str],
+    want_forced: bool,
+    want_full: bool,
+    config: dict | None = None,
+    targets: list[tuple[str, int | None, int | None]] | None = None,
+    title: str = "",
+) -> None:
+    """Download the requested variants for one movie or every episode of one series."""
+    from core import load_auto_download_config
+
+    cfg = config or load_auto_download_config()
+    langs = []
+    for language in languages:
+        code = (language or "").strip().lower()
+        if code and code not in langs:
+            langs.append(code)
+    if targets is None:
+        targets = []
+        if kind == "series":
+            for path, season, episode in episode_strms_in_series(folder):
+                targets.append((path, season, episode))
+        else:
+            strm = movie_strm_in_folder(folder)
+            if strm:
+                targets.append((strm, None, None))
+    label = title or os.path.basename(folder) or "titolo"
+    variants = []
+    if want_forced:
+        variants.append(True)
+    if want_full:
+        variants.append(False)
+    total = len(targets) * len(langs) * len(variants)
+    if total == 0:
+        _write_subtitle_request_status(
+            {
+                "running": False,
+                "done": 0,
+                "total": 0,
+                "ok": 0,
+                "skipped": 0,
+                "failed": 0,
+                "title": label,
+                "log": [f"Nessun file trovato per {label}"],
+            }
+        )
+        return
+    status = {
+        "running": True,
+        "done": 0,
+        "total": total,
+        "ok": 0,
+        "skipped": 0,
+        "failed": 0,
+        "title": label,
+        "log": [f"Richiesta: {label} ({total} file)"],
+        "results": [],
+    }
+    _write_subtitle_request_status(status)
+    done = 0
+    for strm_path, season, episode in targets:
+        for language in langs:
+            for forced in variants:
+                info = fetch_subtitle_variant(
+                    strm_path,
+                    language=language,
+                    forced=forced,
+                    season=season,
+                    episode=episode,
+                    config=cfg,
+                    log=_append_subtitle_log,
+                )
+                done += 1
+                media_label = (
+                    f"S{int(season):02d}E{int(episode):02d}"
+                    if season and episode
+                    else os.path.basename(strm_path)
+                )
+                row = subtitle_result_row(info, label=media_label)
+                with _request_lock:
+                    current = load_subtitle_request_status()
+                    current["done"] = done
+                    current["total"] = total
+                    results = list(current.get("results") or [])
+                    results.append(row)
+                    current["results"] = results[-80:]
+                    if info.get("skipped"):
+                        current["skipped"] = int(current.get("skipped") or 0) + 1
+                    elif info.get("ok"):
+                        current["ok"] = int(current.get("ok") or 0) + 1
+                    else:
+                        current["failed"] = int(current.get("failed") or 0) + 1
+                    _write_subtitle_request_status(current)
+                time.sleep(0.4)
+    with _request_lock:
+        current = load_subtitle_request_status()
+        current["running"] = False
+        lines = list(current.get("log") or [])
+        lines.append(
+            f"Finito: ok={current.get('ok', 0)} skip={current.get('skipped', 0)} "
+            f"fail={current.get('failed', 0)}"
+        )
+        current["log"] = lines[-40:]
+        _write_subtitle_request_status(current)
+
+
+def run_library_subtitle_request(
+    *,
+    server: str,
+    item_id: str,
+    kind: str,
+    title: str,
+    languages: list[str],
+    want_forced: bool,
+    want_full: bool,
+    config: dict | None = None,
+) -> None:
+    from core import load_auto_download_config
+
+    cfg = config or load_auto_download_config()
+    targets = library_media_targets(server=server, item_id=item_id, kind=kind, config=cfg)
+    run_subtitle_request(
+        kind=kind,
+        languages=languages,
+        want_forced=want_forced,
+        want_full=want_full,
+        config=cfg,
+        targets=targets,
+        title=title,
+    )
+
+
+def start_subtitle_request(**kwargs) -> bool:
+    return schedule_subs_job("subtitle-request", run_subtitle_request, **kwargs)
+
+
+def start_library_subtitle_request(**kwargs) -> bool:
+    return schedule_subs_job("subtitle-request", run_library_subtitle_request, **kwargs)

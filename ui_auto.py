@@ -14,11 +14,13 @@ from core import (
     save_auto_download_config,
 )
 from deletion import (
+    clear_deletion_dismissals,
     delete_series_downloads_and_restore_strm,
     dismiss_deletion_prompt,
     folder_has_video_files,
     load_deletion_prompts,
     remove_deletion_prompt,
+    scan_completed_series_prompts,
 )
 from i18n import t, translate_history_type
 from ui_common import (
@@ -31,6 +33,8 @@ from ui_common import (
 )
 
 def render_deletion_prompts() -> None:
+    from deletion import deletion_prompt_identity
+
     raw_prompts = load_deletion_prompts().get("pending", [])
     prompts = []
     for item in raw_prompts:
@@ -38,8 +42,9 @@ def render_deletion_prompts() -> None:
         if not paths:
             # Stale prompt (already deleted on disk) — drop it quietly.
             sid = str(item.get("series_id") or "")
+            season = item.get("season")
             if sid:
-                remove_deletion_prompt(sid)
+                remove_deletion_prompt(sid, season=season if season not in (None, "") else None)
             continue
         prompts.append({**item, "paths": paths})
     if not prompts:
@@ -52,14 +57,24 @@ def render_deletion_prompts() -> None:
         series_id = item.get("series_id", "")
         series_name = item.get("series_name", t("series_default"))
         paths = item.get("paths", [])
-        st.warning(f"**{series_name}** — {t('folders_to_delete', count=len(paths))}")
+        season_raw = item.get("season")
+        try:
+            season = int(season_raw) if season_raw not in (None, "") else None
+        except (TypeError, ValueError):
+            season = None
+        identity = deletion_prompt_identity(series_id, season)
+        if season is not None:
+            title = t("season_completed_title", name=series_name, season=season)
+        else:
+            title = series_name
+        st.warning(f"**{title}** — {t('folders_to_delete', count=len(paths))}")
         for path in paths:
             st.code(path, language=None)
 
         col_yes, col_no = st.columns(2)
         with col_yes:
-            if st.button(t("btn_delete_yes"), key=f"delete_series_yes_{series_id}"):
-                prompt = remove_deletion_prompt(series_id)
+            if st.button(t("btn_delete_yes"), key=f"delete_series_yes_{identity}"):
+                prompt = remove_deletion_prompt(series_id, season=season)
                 if prompt:
                     with st.spinner(t("deleting_and_restoring_strm")):
                         result = delete_series_downloads_and_restore_strm(
@@ -68,11 +83,12 @@ def render_deletion_prompts() -> None:
                         )
                     deleted = result.get("deleted") or []
                     restore = result.get("restore") or {}
+                    display_name = title
                     if deleted:
                         st.success(
                             t(
                                 "deleted_series_restored",
-                                name=series_name,
+                                name=display_name,
                                 episodes=len(result.get("episodes") or []),
                                 created=len(restore.get("created") or [])
                                 + len(restore.get("updated") or []),
@@ -94,11 +110,11 @@ def render_deletion_prompts() -> None:
                                 )
                             )
                     else:
-                        st.info(t("no_files_series", name=series_name))
+                        st.info(t("no_files_series", name=display_name))
                 st.rerun()
         with col_no:
-            if st.button(t("btn_delete_no"), key=f"delete_series_no_{series_id}"):
-                dismiss_deletion_prompt(series_id)
+            if st.button(t("btn_delete_no"), key=f"delete_series_no_{identity}"):
+                dismiss_deletion_prompt(series_id, season=season)
                 st.rerun()
         st.divider()
 
@@ -199,23 +215,26 @@ def render_auto_download_section() -> None:
     saved = load_auto_download_config()
     series_labels = [t(key) for key, _path in SERIES_DEST_OPTIONS]
 
-    with st.form("auto_download_form"):
-        enabled = st.checkbox(t("enable_auto"), value=saved.get("enabled", False))
-        prompt_delete = st.checkbox(
-            t("prompt_delete_completed"),
-            value=saved.get("prompt_delete_completed", True),
-            help=t("prompt_delete_help"),
-        )
-        continue_incomplete = st.checkbox(
-            t("continue_download_incomplete"),
-            value=saved.get("continue_download_incomplete", True),
-            help=t("continue_download_incomplete_help"),
-        )
-        allow_4k = st.checkbox(
-            t("include_4k"),
-            value=saved.get("allow_4k", False),
-            help=t("include_4k_help"),
-        )
+    # Keep essentials always visible. Collapsible blocks must stay OUTSIDE st.form:
+    # expanders inside forms stay visually open / flattened on this Streamlit build.
+    enabled = st.checkbox(t("enable_auto"), value=saved.get("enabled", False))
+    prompt_delete = st.checkbox(
+        t("prompt_delete_completed"),
+        value=saved.get("prompt_delete_completed", True),
+        help=t("prompt_delete_help"),
+    )
+    continue_incomplete = st.checkbox(
+        t("continue_download_incomplete"),
+        value=saved.get("continue_download_incomplete", True),
+        help=t("continue_download_incomplete_help"),
+    )
+    allow_4k = st.checkbox(
+        t("include_4k"),
+        value=saved.get("allow_4k", False),
+        help=t("include_4k_help"),
+    )
+
+    with st.expander(t("options_common_section"), expanded=False):
         prefetch_playing = st.checkbox(
             t("prefetch_playing_strm"),
             value=saved.get("prefetch_playing_strm", False),
@@ -301,36 +320,6 @@ def render_auto_download_section() -> None:
             value=False,
             help=t("stream_proxy_rewrite_strms_help"),
         )
-        st.markdown(f"**{t('emby_section')}**")
-        emby_enabled = st.checkbox(t("enable_emby"), value=saved.get("emby_enabled", False))
-        emby_url = st.text_input(
-            t("emby_url"),
-            value=saved.get("emby_url", ""),
-            placeholder="http://localhost:8096",
-            help=t("emby_url_help"),
-        )
-        emby_api_key = st.text_input(t("emby_api_key"), value=saved.get("emby_api_key", ""), type="password")
-        emby_username = st.text_input(
-            t("emby_username"),
-            value=saved.get("emby_username", ""),
-            help=t("emby_username_help"),
-        )
-        st.markdown(f"**{t('jellyfin_section')}**")
-        jellyfin_enabled = st.checkbox(t("enable_jellyfin"), value=saved.get("jellyfin_enabled", False))
-        jellyfin_url = st.text_input(
-            t("jellyfin_url"),
-            value=saved.get("jellyfin_url", ""),
-            placeholder="http://localhost:8096",
-            help=t("jellyfin_url_help"),
-        )
-        jellyfin_api_key = st.text_input(
-            t("jellyfin_api_key"), value=saved.get("jellyfin_api_key", ""), type="password"
-        )
-        jellyfin_username = st.text_input(
-            t("jellyfin_username"),
-            value=saved.get("jellyfin_username", ""),
-            help=t("jellyfin_username_help"),
-        )
         series_dest_label = st.selectbox(
             t("series_dest_auto"),
             series_labels,
@@ -351,20 +340,81 @@ def render_auto_download_section() -> None:
                 max_value=120,
                 value=int(saved.get("poll_interval_seconds", 20)),
             )
-        col_save, col_test_emby, col_test_jelly = st.columns([2, 1, 1])
-        with col_save:
-            submitted = st.form_submit_button(t("save_auto_settings"), use_container_width=True)
-        with col_test_emby:
-            test_emby = st.form_submit_button(t("test_emby_connection"), use_container_width=True)
-        with col_test_jelly:
-            test_jellyfin = st.form_submit_button(t("test_jellyfin_connection"), use_container_width=True)
+
+    with st.expander(t("emby_section"), expanded=False):
+        emby_enabled = st.checkbox(t("enable_emby"), value=saved.get("emby_enabled", False))
+        emby_url = st.text_input(
+            t("emby_url"),
+            value=saved.get("emby_url", ""),
+            placeholder="http://localhost:8096",
+            help=t("emby_url_help"),
+        )
+        emby_api_key = st.text_input(
+            t("emby_api_key"), value=saved.get("emby_api_key", ""), type="password"
+        )
+        emby_username = st.text_input(
+            t("emby_username"),
+            value=saved.get("emby_username", ""),
+            help=t("emby_username_help"),
+        )
+
+    with st.expander(t("jellyfin_section"), expanded=False):
+        jellyfin_enabled = st.checkbox(
+            t("enable_jellyfin"), value=saved.get("jellyfin_enabled", False)
+        )
+        jellyfin_url = st.text_input(
+            t("jellyfin_url"),
+            value=saved.get("jellyfin_url", ""),
+            placeholder="http://localhost:8096",
+            help=t("jellyfin_url_help"),
+        )
+        jellyfin_api_key = st.text_input(
+            t("jellyfin_api_key"), value=saved.get("jellyfin_api_key", ""), type="password"
+        )
+        jellyfin_username = st.text_input(
+            t("jellyfin_username"),
+            value=saved.get("jellyfin_username", ""),
+            help=t("jellyfin_username_help"),
+        )
+
+    with st.expander(t("silo_section"), expanded=False):
+        silo_enabled = st.checkbox(t("enable_silo"), value=saved.get("silo_enabled", False))
+        silo_url = st.text_input(
+            t("silo_url"),
+            value=saved.get("silo_url") or "http://127.0.0.1:8090",
+            placeholder="http://127.0.0.1:8090",
+            help=t("silo_url_help"),
+        )
+        silo_api_key = st.text_input(
+            t("silo_api_key"), value=saved.get("silo_api_key", ""), type="password"
+        )
+        silo_username = st.text_input(
+            t("silo_username"),
+            value=saved.get("silo_username", ""),
+            help=t("silo_username_help"),
+        )
+
+    col_save, col_test_emby, col_test_jelly, col_test_silo = st.columns([2, 1, 1, 1])
+    with col_save:
+        submitted = st.button(t("save_auto_settings"), use_container_width=True, type="primary")
+    with col_test_emby:
+        test_emby = st.button(t("test_emby_connection"), use_container_width=True)
+    with col_test_jelly:
+        test_jellyfin = st.button(t("test_jellyfin_connection"), use_container_width=True)
+    with col_test_silo:
+        test_silo = st.button(t("test_silo_connection"), use_container_width=True)
 
     if test_emby:
         ok, detail = test_media_server_connection("emby", emby_url, emby_api_key, emby_username)
         show_media_server_test_result("emby", ok, detail)
     if test_jellyfin:
-        ok, detail = test_media_server_connection("jellyfin", jellyfin_url, jellyfin_api_key, jellyfin_username)
+        ok, detail = test_media_server_connection(
+            "jellyfin", jellyfin_url, jellyfin_api_key, jellyfin_username
+        )
         show_media_server_test_result("jellyfin", ok, detail)
+    if test_silo:
+        ok, detail = test_media_server_connection("silo", silo_url, silo_api_key, silo_username)
+        show_media_server_test_result("silo", ok, detail)
 
     if submitted:
         dest_path = SERIES_DEST_OPTIONS[series_labels.index(series_dest_label)][1]
@@ -378,6 +428,10 @@ def render_auto_download_section() -> None:
             "jellyfin_url": jellyfin_url.strip(),
             "jellyfin_api_key": jellyfin_api_key.strip(),
             "jellyfin_username": jellyfin_username.strip(),
+            "silo_enabled": silo_enabled,
+            "silo_url": silo_url.strip() or "http://127.0.0.1:8090",
+            "silo_api_key": silo_api_key.strip(),
+            "silo_username": silo_username.strip(),
             "series_dest": dest_path,
             "cooldown_seconds": int(cooldown),
             "poll_interval_seconds": int(poll_interval),
@@ -409,6 +463,7 @@ def render_auto_download_section() -> None:
             "opensubtitles_password": str(saved.get("opensubtitles_password") or ""),
             "opensubtitles_api_key": str(saved.get("opensubtitles_api_key") or ""),
             "opensubtitles_jf_config": str(saved.get("opensubtitles_jf_config") or ""),
+            "deepl_api_key": str(saved.get("deepl_api_key") or ""),
             "jellyfin_series_root": str(saved.get("jellyfin_series_root") or "/media/tv"),
             "jellyfin_movies_root": str(saved.get("jellyfin_movies_root") or "/media/movies"),
             "emby_series_root": str(saved.get("emby_series_root") or "/data/tv"),
@@ -441,6 +496,26 @@ def render_auto_download_section() -> None:
             if rewrite.get("errors"):
                 st.warning("; ".join(str(e) for e in rewrite["errors"][:5]))
 
+    dismissed_n = len(load_deletion_prompts().get("dismissed") or [])
+    col_rescan, col_undismiss = st.columns(2)
+    with col_rescan:
+        if st.button(t("rescan_completed_series"), use_container_width=True):
+            added = _rescan_completed_series_now(load_auto_download_config())
+            if added:
+                st.success(t("rescan_completed_series_added", count=added))
+            else:
+                st.info(t("rescan_completed_series_none"))
+            st.rerun()
+    with col_undismiss:
+        if st.button(
+            t("clear_deletion_dismissals", count=dismissed_n),
+            use_container_width=True,
+            disabled=dismissed_n <= 0,
+        ):
+            cleared = clear_deletion_dismissals()
+            st.success(t("clear_deletion_dismissals_done", count=cleared))
+            st.rerun()
+
     st.divider()
 
     @st.fragment(run_every=timedelta(seconds=refresh_seconds))
@@ -448,3 +523,37 @@ def render_auto_download_section() -> None:
         render_auto_download_live_panel(saved, refresh_seconds)
 
     live_status_panel()
+
+
+def _rescan_completed_series_now(config: dict) -> int:
+    """Run deletion scan against each enabled media server; return prompts added."""
+    total = 0
+    servers = (
+        ("emby", "emby_enabled", "emby_url", "emby_api_key", "emby_username"),
+        ("jellyfin", "jellyfin_enabled", "jellyfin_url", "jellyfin_api_key", "jellyfin_username"),
+        ("silo", "silo_enabled", "silo_url", "silo_api_key", "silo_username"),
+    )
+    for server_id, enabled_key, url_key, key_key, user_key in servers:
+        if not config.get(enabled_key):
+            continue
+        url = str(config.get(url_key) or "").strip()
+        api_key = str(config.get(key_key) or "").strip()
+        username = str(config.get(user_key) or "").strip()
+        if not url or not api_key or not username:
+            continue
+        try:
+            if server_id == "silo":
+                from silo_client import SiloClient
+
+                client = SiloClient(url, api_key)
+            else:
+                from emby_watcher import MediaServerClient
+
+                client = MediaServerClient(url, api_key, server_id)
+            user_id = client.resolve_user_id(username)
+            if not user_id:
+                continue
+            total += scan_completed_series_prompts(client, user_id)
+        except Exception:
+            continue
+    return total

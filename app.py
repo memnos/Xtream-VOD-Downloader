@@ -27,10 +27,13 @@ from ui_common import (
     save_allow_4k_setting,
 )
 from ui_duration import render_strm_duration_audit_section
+from ui_local_movies import render_local_movies_section
 from ui_manual import render_manual_download_section
 from ui_strm import render_strm_sync_section
+from ui_subtitles import render_subtitle_request_section
+from ui_theme import inject_theme, render_app_header
 
-APP_VERSION = "2.32.0"
+APP_VERSION = "2.37.1"
 
 SECTION_BY_MODE = {
     "manual": "download",
@@ -38,10 +41,13 @@ SECTION_BY_MODE = {
     "strm": "library",
     "duration": "library",
     "assist": "assist",
+    "local_movies": "assist",
+    "subtitles": "assist",
 }
 DOWNLOAD_MODES = ["manual", "auto"]
 LIBRARY_MODES = ["strm", "duration"]
-MODE_KEYS = ["manual", "strm", "duration", "auto", "assist"]
+ASSIST_MODES = ["assist", "local_movies", "subtitles"]
+MODE_KEYS = ["manual", "strm", "duration", "auto", "assist", "local_movies", "subtitles"]
 CONTENT_KEYS = ["movies", "series"]
 SECTION_KEYS = ["download", "library", "assist"]
 
@@ -49,8 +55,9 @@ SECTION_KEYS = ["download", "library", "assist"]
 ensure_download_tree_permissions()
 
 st.set_page_config(page_title=t("page_title"), layout="wide", page_icon="📺")
+inject_theme()
 render_lang_selector()
-st.title(t("app_title"))
+render_app_header()
 st.sidebar.caption(t("build", version=APP_VERSION))
 
 _init_cred_session_state()
@@ -94,7 +101,10 @@ def _on_nav_section_change() -> None:
             mode = "strm"
         st.session_state["library_mode"] = mode
     else:
-        mode = "assist"
+        mode = st.session_state.get("assist_mode", "assist")
+        if mode not in ASSIST_MODES:
+            mode = "assist"
+        st.session_state["assist_mode"] = mode
     st.session_state["ui_mode"] = mode
     _persist_ui_nav_prefs()
 
@@ -105,6 +115,10 @@ def _on_download_mode_change() -> None:
 
 def _on_library_mode_change() -> None:
     _set_ui_mode(st.session_state.get("library_mode", "strm"))
+
+
+def _on_assist_mode_change() -> None:
+    _set_ui_mode(st.session_state.get("assist_mode", "assist"))
 
 
 def _on_content_change() -> None:
@@ -121,6 +135,10 @@ if st.session_state["ui_mode"] in LIBRARY_MODES:
     st.session_state["library_mode"] = st.session_state["ui_mode"]
 elif "library_mode" not in st.session_state:
     st.session_state["library_mode"] = "strm"
+if st.session_state["ui_mode"] in ASSIST_MODES:
+    st.session_state["assist_mode"] = st.session_state["ui_mode"]
+elif "assist_mode" not in st.session_state:
+    st.session_state["assist_mode"] = "assist"
 
 # --- Sidebar: Login ---
 saved_creds = load_credentials()
@@ -178,6 +196,8 @@ with st.sidebar.expander(t("nav_section"), expanded=True):
         "duration": t("mode_duration"),
         "auto": t("mode_auto"),
         "assist": t("mode_assist"),
+        "local_movies": t("mode_local_movies"),
+        "subtitles": t("mode_subtitles"),
     }
 
     if section == "download":
@@ -211,10 +231,14 @@ with st.sidebar.expander(t("nav_section"), expanded=True):
         )
         st.session_state["ui_mode"] = st.session_state["library_mode"]
     else:
-        if st.session_state.get("ui_mode") != "assist":
-            st.session_state["ui_mode"] = "assist"
-            _persist_ui_nav_prefs()
-        st.caption(t("mode_assist"))
+        st.radio(
+            t("mode_label"),
+            ASSIST_MODES,
+            format_func=lambda key: mode_label_by_key[key],
+            key="assist_mode",
+            on_change=_on_assist_mode_change,
+        )
+        st.session_state["ui_mode"] = st.session_state["assist_mode"]
 
 mode_key = st.session_state.get("ui_mode", "manual")
 content_key = st.session_state.get("content_mode", "movies")
@@ -239,12 +263,17 @@ with st.sidebar.expander(t("sidebar_options"), expanded=False):
     else:
         st.caption(t("enter_creds"))
 
-# Compact server status in sidebar for assist mode only (once).
-if mode_key == "assist":
+# Compact server status in sidebar for assist modes only (once).
+if mode_key in ASSIST_MODES:
     config = load_auto_download_config()
     status = load_watcher_status()
     render_server_traffic_lights(config, bool(status.get("running")), compact=True)
-    render_playback_assist_section()
+    if mode_key == "local_movies":
+        render_local_movies_section()
+    elif mode_key == "subtitles":
+        render_subtitle_request_section()
+    else:
+        render_playback_assist_section()
     st.stop()
 
 if mode_key == "auto":

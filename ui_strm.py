@@ -326,26 +326,17 @@ def render_strm_sync_section(host: str, user: str, pw: str) -> None:
     if not vod_labels and not series_labels:
         st.caption(t("strm_categories_hint"))
 
-    with st.form("strm_sync_form"):
-        sync_movies = st.checkbox(t("strm_sync_movies"), value=saved.get("sync_movies", True))
-        sync_series = st.checkbox(t("strm_sync_series"), value=saved.get("sync_series", True))
-        allow_4k = st.checkbox(
-            t("include_4k"),
-            value=saved.get("allow_4k", False),
-            help=t("include_4k_strm_help"),
-        )
-        convert_4k_only_after_sync = st.checkbox(
-            t("strm_convert_4k_only"),
-            value=saved.get("convert_4k_only_after_sync", False),
-            help=t("strm_convert_4k_only_help"),
-        )
-        convert_4k_only_limit = st.number_input(
-            t("strm_convert_4k_only_limit"),
-            min_value=0,
-            max_value=50,
-            value=int(saved.get("convert_4k_only_limit", 1) or 0),
-            help=t("strm_convert_4k_only_limit_help"),
-        )
+    # Essentials visible; secondary settings in expanders (outside st.form —
+    # expanders inside forms stay flattened on this Streamlit build).
+    sync_movies = st.checkbox(t("strm_sync_movies"), value=saved.get("sync_movies", True))
+    sync_series = st.checkbox(t("strm_sync_series"), value=saved.get("sync_series", True))
+    allow_4k = st.checkbox(
+        t("include_4k"),
+        value=saved.get("allow_4k", False),
+        help=t("include_4k_strm_help"),
+    )
+
+    with st.expander(t("strm_paths_section"), expanded=False):
         movies_output = st.text_input(
             t("strm_movies_output"),
             value=saved.get("movies_output", STRM_OUTPUT_MOVIES_PATH),
@@ -382,8 +373,6 @@ def render_strm_sync_section(host: str, user: str, pw: str) -> None:
             value=saved.get("remove_missing", False),
             help=t("strm_remove_missing_help"),
         )
-        # Keep the slider enabled inside st.form: form widgets do not rerun on change,
-        # so disabled=not remove_missing would leave the slider stuck until save.
         cleanup_min_ratio_percent = st.slider(
             t("strm_cleanup_min_ratio"),
             min_value=5,
@@ -391,9 +380,22 @@ def render_strm_sync_section(host: str, user: str, pw: str) -> None:
             value=int(float(saved.get("cleanup_min_ratio", 0.5)) * 100),
             step=5,
             help=t("strm_cleanup_min_ratio_help"),
+            disabled=not remove_missing,
+        )
+        convert_4k_only_after_sync = st.checkbox(
+            t("strm_convert_4k_only"),
+            value=saved.get("convert_4k_only_after_sync", False),
+            help=t("strm_convert_4k_only_help"),
+        )
+        convert_4k_only_limit = st.number_input(
+            t("strm_convert_4k_only_limit"),
+            min_value=0,
+            max_value=50,
+            value=int(saved.get("convert_4k_only_limit", 1) or 0),
+            help=t("strm_convert_4k_only_limit_help"),
         )
 
-        st.markdown(f"**{t('strm_tmdb_section')}**")
+    with st.expander(t("strm_tmdb_section"), expanded=False):
         use_tmdb = st.checkbox(
             t("strm_use_tmdb"),
             value=saved.get("use_tmdb", False),
@@ -428,7 +430,7 @@ def render_strm_sync_section(host: str, user: str, pw: str) -> None:
             help=t("strm_filter_tmdb_episodes_help"),
         )
 
-        st.markdown(f"**{t('strm_schedule_section')}**")
+    with st.expander(t("strm_schedule_section"), expanded=False):
         schedule_enabled = st.checkbox(
             t("strm_schedule_enabled"),
             value=saved.get("schedule_enabled", False),
@@ -474,7 +476,7 @@ def render_strm_sync_section(host: str, user: str, pw: str) -> None:
                     value=int(saved.get("schedule_minute", 0)),
                 )
 
-        st.markdown(f"**{t('strm_url_check_section')}**")
+    with st.expander(t("strm_url_check_section"), expanded=False):
         url_check_modes = [
             ("weekly", t("strm_url_check_mode_weekly")),
             ("every_sync", t("strm_url_check_mode_every")),
@@ -522,7 +524,7 @@ def render_strm_sync_section(host: str, user: str, pw: str) -> None:
             help=t("strm_url_check_on_manual_help"),
         )
 
-        st.markdown(f"**{t('strm_filter_section')}**")
+    with st.expander(t("strm_filter_section"), expanded=False):
         exclude_adult = st.checkbox(
             t("strm_exclude_adult"),
             value=saved.get("exclude_adult", True),
@@ -541,7 +543,7 @@ def render_strm_sync_section(host: str, user: str, pw: str) -> None:
             height=80,
         )
 
-        st.markdown(f"**{t('strm_refresh_section')}**")
+    with st.expander(t("strm_refresh_section"), expanded=False):
         refresh_emby = st.checkbox(
             t("strm_refresh_emby"),
             value=saved.get("refresh_emby", False),
@@ -555,11 +557,13 @@ def render_strm_sync_section(host: str, user: str, pw: str) -> None:
         if not auto_config.get("emby_enabled") and not auto_config.get("jellyfin_enabled"):
             st.caption(t("strm_refresh_disabled_hint"))
 
-        col_save, col_sync = st.columns(2)
-        with col_save:
-            submitted = st.form_submit_button(t("strm_save_settings"), use_container_width=True)
-        with col_sync:
-            sync_now = st.form_submit_button(t("strm_sync_now"), use_container_width=True)
+    col_save, col_sync = st.columns(2)
+    with col_save:
+        submitted = st.button(
+            t("strm_save_settings"), use_container_width=True, type="primary"
+        )
+    with col_sync:
+        sync_now = st.button(t("strm_sync_now"), use_container_width=True)
 
     def _parse_terms(text: str) -> list[str]:
         items: list[str] = []

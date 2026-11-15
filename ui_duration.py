@@ -54,34 +54,35 @@ def render_strm_duration_audit_section(saved: dict) -> None:
     st.subheader(t("strm_duration_audit_title"))
     st.caption(t("strm_duration_audit_help"))
 
-    col_thr, col_workers, col_force = st.columns([1, 1, 2])
-    with col_thr:
-        threshold_min = st.number_input(
-            t("strm_duration_threshold"),
-            min_value=1,
-            max_value=60,
-            value=5,
-            step=1,
-            key="strm_duration_threshold_min",
-        )
-    with col_workers:
-        workers = st.number_input(
-            t("strm_duration_workers"),
-            min_value=1,
-            max_value=1,
-            value=1,
-            step=1,
-            key="strm_duration_workers",
-            help=t("strm_duration_workers_help"),
-            disabled=True,
-        )
-    with col_force:
-        force_rescan = st.checkbox(
-            t("strm_duration_force_rescan"),
-            value=False,
-            key="strm_duration_force_rescan",
-            help=t("strm_duration_force_rescan_help"),
-        )
+    with st.expander(t("strm_duration_options"), expanded=False):
+        col_thr, col_workers, col_force = st.columns([1, 1, 2])
+        with col_thr:
+            threshold_min = st.number_input(
+                t("strm_duration_threshold"),
+                min_value=1,
+                max_value=60,
+                value=5,
+                step=1,
+                key="strm_duration_threshold_min",
+            )
+        with col_workers:
+            workers = st.number_input(
+                t("strm_duration_workers"),
+                min_value=1,
+                max_value=1,
+                value=1,
+                step=1,
+                key="strm_duration_workers",
+                help=t("strm_duration_workers_help"),
+                disabled=True,
+            )
+        with col_force:
+            force_rescan = st.checkbox(
+                t("strm_duration_force_rescan"),
+                value=False,
+                key="strm_duration_force_rescan",
+                help=t("strm_duration_force_rescan_help"),
+            )
 
     run_col, stop_col = st.columns(2)
     with run_col:
@@ -234,18 +235,19 @@ def render_strm_duration_audit_section(saved: dict) -> None:
     else:
         st.warning(avail_msg)
 
-    jf_root = st.text_input(
-        t("strm_jf_movies_root"),
-        value="/media/movies",
-        key="strm_jf_movies_root",
-        help=t("strm_jf_movies_root_help"),
-    )
-    force_repush = st.checkbox(
-        t("strm_jf_force_repush"),
-        value=False,
-        key="strm_jf_force_repush",
-        help=t("strm_jf_force_repush_help"),
-    )
+    with st.expander(t("strm_jf_push_options"), expanded=False):
+        jf_root = st.text_input(
+            t("strm_jf_movies_root"),
+            value="/media/movies",
+            key="strm_jf_movies_root",
+            help=t("strm_jf_movies_root_help"),
+        )
+        force_repush = st.checkbox(
+            t("strm_jf_force_repush"),
+            value=False,
+            key="strm_jf_force_repush",
+            help=t("strm_jf_force_repush_help"),
+        )
     push_btn = st.button(
         t("strm_jf_push_now"),
         use_container_width=True,
@@ -294,15 +296,16 @@ def render_strm_duration_audit_section(saved: dict) -> None:
     st.divider()
     st.subheader(t("strm_mismatch_resolve_title"))
     st.caption(t("strm_mismatch_resolve_help"))
-    mm_limit = st.number_input(
-        t("strm_mismatch_resolve_limit"),
-        min_value=0,
-        max_value=5000,
-        value=100,
-        step=10,
-        key="strm_mismatch_resolve_limit",
-        help=t("strm_mismatch_resolve_limit_help"),
-    )
+    with st.expander(t("strm_mismatch_options"), expanded=False):
+        mm_limit = st.number_input(
+            t("strm_mismatch_resolve_limit"),
+            min_value=0,
+            max_value=5000,
+            value=100,
+            step=10,
+            key="strm_mismatch_resolve_limit",
+            help=t("strm_mismatch_resolve_limit_help"),
+        )
 
     mm_btn = st.button(
         t("strm_mismatch_resolve_now"),

@@ -209,6 +209,7 @@ def media_servers_now_playing() -> list[str]:
     servers = (
         ("emby", "emby_enabled", "emby_url", "emby_api_key"),
         ("jellyfin", "jellyfin_enabled", "jellyfin_url", "jellyfin_api_key"),
+        ("silo", "silo_enabled", "silo_url", "silo_api_key"),
     )
     for server_id, enabled_key, url_key, key_key in servers:
         if not auto.get(enabled_key):
@@ -218,7 +219,12 @@ def media_servers_now_playing() -> list[str]:
         if not url or not api_key:
             continue
         try:
-            client = MediaServerClient(url, api_key, server_id)
+            if server_id == "silo":
+                from silo_client import SiloClient
+
+                client = SiloClient(url, api_key)
+            else:
+                client = MediaServerClient(url, api_key, server_id)
             for session in client.get_sessions():
                 item = session.get("NowPlayingItem") or {}
                 if not item:

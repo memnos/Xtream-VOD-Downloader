@@ -40,6 +40,8 @@ from core import (
 from deletion import (
     add_deletion_prompt,
     find_series_download_paths,
+    is_season_fully_watched,
+    iter_local_season_folders,
     prune_incomplete_deletion_prompts,
     scan_completed_series_prompts,
     series_production_finished,
@@ -50,6 +52,7 @@ from continue_download import (
     scan_and_enqueue_continue_downloads,
     take_pending_auto_downloads,
 )
+from silo_client import SiloClient
 
 
 @dataclass
@@ -590,6 +593,36 @@ class MediaServerClient:
                 break
         return items
 
+    def search_library(self, user_id: str, kind: str, search_term: str, limit: int = 20) -> list:
+        """Movies or series already in this server's library."""
+        term = (search_term or "").strip()
+        if not term or not user_id:
+            return []
+        item_type = "Series" if kind == "series" else "Movie"
+        data = self._get(
+            f"/emby/Users/{user_id}/Items",
+            {
+                "Recursive": "true",
+                "IncludeItemTypes": item_type,
+                "SearchTerm": term,
+                "Fields": "Path,ProductionYear,ProviderIds",
+                "Limit": max(1, min(int(limit or 20), 40)),
+            },
+        )
+        found = []
+        for row in _as_item_list(data):
+            item_id = str(row.get("Id") or "").strip()
+            name = str(row.get("Name") or "").strip()
+            if item_id and name:
+                found.append(
+                    {
+                        "Id": item_id,
+                        "Name": name,
+                        "Year": row.get("ProductionYear") or "",
+                    }
+                )
+        return found
+
     def search_series(self, user_id: str, search_term: str, limit: int = 10) -> list:
         data = self._get(
             f"/emby/Users/{user_id}/Items",
@@ -754,6 +787,7 @@ class AutoDownloadWatcher:
         servers = (
             ("emby", "emby_enabled", "emby_url", "emby_api_key", "emby_username"),
             ("jellyfin", "jellyfin_enabled", "jellyfin_url", "jellyfin_api_key", "jellyfin_username"),
+            ("silo", "silo_enabled", "silo_url", "silo_api_key", "silo_username"),
         )
         for server_id, enabled_key, url_key, key_key, user_key in servers:
             if not config.get(enabled_key):
@@ -772,7 +806,10 @@ class AutoDownloadWatcher:
                 sessions.append(cached[1])
                 continue
             try:
-                client = MediaServerClient(url, api_key, server_id)
+                if server_id == "silo":
+                    client = SiloClient(url, api_key)
+                else:
+                    client = MediaServerClient(url, api_key, server_id)
                 user_id = client.resolve_user_id(username)
                 if not user_id:
                     self._session_cache.pop(server_id, None)
@@ -783,8 +820,8 @@ class AutoDownloadWatcher:
                 sessions.append(session)
             except Exception as exc:
                 self._session_cache.pop(server_id, None)
-                label = "Jellyfin" if server_id == "jellyfin" else "Emby"
-                self._log(f"{label}: {exc}")
+                labels = {"jellyfin": "Jellyfin", "silo": "Silo"}
+                self._log(f"{labels.get(server_id, 'Emby')}: {exc}")
         for server_id in list(self._session_cache):
             if server_id not in active_servers:
                 self._session_cache.pop(server_id, None)
@@ -1143,25 +1180,32 @@ class AutoDownloadWatcher:
 
         if config.get("auto_subs_enabled"):
             try:
-                from auto_subtitles import ensure_season_subtitles
+                from auto_subtitles import ensure_season_subtitles, schedule_subs_job
 
-                summary = ensure_season_subtitles(
-                    client,
-                    user_id=user_id,
-                    series_id=series_id,
-                    season=season,
-                    config=config,
-                    from_episode=episode,
-                    prefer_forced=bool(config.get("auto_subs_prefer_forced", True)),
-                    language=str(config.get("auto_subs_language") or "it"),
-                    log=self._log,
-                    verify_playback_info=xtream_ok,
-                )
-                self._log(
-                    f"Sottotitoli S{season:02d} da E{episode:02d}: "
-                    f"ok={summary.get('ok')} skip={summary.get('skipped')} "
-                    f"fail={summary.get('failed')}"
-                )
+                def _series_subs() -> None:
+                    summary = ensure_season_subtitles(
+                        client,
+                        user_id=user_id,
+                        series_id=series_id,
+                        season=season,
+                        config=config,
+                        from_episode=1,
+                        prefer_forced=bool(config.get("auto_subs_prefer_forced", True)),
+                        language=str(config.get("auto_subs_language") or "it"),
+                        log=self._log,
+                        verify_playback_info=xtream_ok,
+                        all_seasons=True,
+                    )
+                    self._log(
+                        f"Sottotitoli serie intera: "
+                        f"ok={summary.get('ok')} skip={summary.get('skipped')} "
+                        f"fail={summary.get('failed')}"
+                    )
+
+                if schedule_subs_job(f"series-subs:{series_id}", _series_subs):
+                    self._log(f"Sottotitoli: ricerca su tutti gli episodi di {label}")
+                else:
+                    self._log(f"Sottotitoli: ricerca già in corso per {label}")
             except Exception as exc:
                 self._log(f"Sottotitoli errore: {exc}")
 
@@ -2241,21 +2285,38 @@ class AutoDownloadWatcher:
         if not config.get("prompt_delete_completed", True):
             return
         episodes = media.get_series_episodes(user_id, ended.series_id, include_user_data=True)
-        if not should_prompt_series_deletion(episodes, ended.season, ended.episode):
-            return
         paths = find_series_download_paths(ended.series_name)
         if not paths:
             return
-        if not series_production_finished(paths):
-            self._log(
-                f"Serie vista ma non ancora conclusa su TMDB: "
-                f"nessuna richiesta eliminazione per {ended.series_name}"
-            )
+
+        # Prefer whole-series cleanup only when TMDB marks the show ended.
+        if should_prompt_series_deletion(episodes, ended.season, ended.episode):
+            if series_production_finished(paths):
+                if add_deletion_prompt(ended.series_id, ended.series_name, paths):
+                    self._log(
+                        f"Serie completata: in attesa conferma eliminazione per {ended.series_name}"
+                    )
+                    with self._lock:
+                        self._status.last_action = f"Serie completata: {ended.series_name}"
+                return
+
+        # Still airing (or not fully done): offer the finished local season.
+        if not is_season_fully_watched(episodes, ended.season):
             return
-        if add_deletion_prompt(ended.series_id, ended.series_name, paths):
-            self._log(f"Serie completata: in attesa conferma eliminazione per {ended.series_name}")
+        season_paths: list[str] = []
+        for series_path in paths:
+            for season_num, season_path in iter_local_season_folders(series_path):
+                if season_num == int(ended.season):
+                    season_paths.append(season_path)
+        if not season_paths:
+            return
+        if add_deletion_prompt(
+            ended.series_id, ended.series_name, season_paths, season=int(ended.season)
+        ):
+            label = f"{ended.series_name} S{int(ended.season):02d}"
+            self._log(f"Stagione completata: in attesa conferma eliminazione per {label}")
             with self._lock:
-                self._status.last_action = f"Serie completata: {ended.series_name}"
+                self._status.last_action = f"Stagione completata: {label}"
 
     def _drain_pending_continue_downloads(self) -> int:
         pending = take_pending_auto_downloads()
