@@ -32,6 +32,19 @@ from ui_common import (
     fetch_vod_categories,
 )
 
+def _sync_config_for_run(config: dict, *, manual: bool) -> dict:
+    """Copy used for one sync. The saved settings stay free of the per-run flag."""
+    run_config = dict(config)
+    mode = str(config.get("url_check_mode") or "weekly")
+    if mode == "every_sync":
+        run_config["verify_existing_urls"] = True
+    elif manual and config.get("url_check_on_manual"):
+        run_config["verify_existing_urls"] = True
+    else:
+        run_config["verify_existing_urls"] = False
+    return run_config
+
+
 def render_strm_recent_additions(saved: dict) -> None:
     st.subheader(t("strm_recent_title"))
     st.caption(t("strm_recent_help"))
@@ -461,6 +474,54 @@ def render_strm_sync_section(host: str, user: str, pw: str) -> None:
                     value=int(saved.get("schedule_minute", 0)),
                 )
 
+        st.markdown(f"**{t('strm_url_check_section')}**")
+        url_check_modes = [
+            ("weekly", t("strm_url_check_mode_weekly")),
+            ("every_sync", t("strm_url_check_mode_every")),
+            ("off", t("strm_url_check_mode_off")),
+        ]
+        saved_url_mode = str(saved.get("url_check_mode") or "weekly")
+        url_mode_values = [value for value, _label in url_check_modes]
+        url_check_mode = st.selectbox(
+            t("strm_url_check_mode"),
+            url_mode_values,
+            index=url_mode_values.index(saved_url_mode) if saved_url_mode in url_mode_values else 0,
+            format_func=dict(url_check_modes).get,
+            help=t("strm_url_check_mode_help"),
+        )
+        weekday_values = list(range(7))
+        saved_weekday = int(saved.get("url_check_weekday", 0) or 0)
+        if saved_weekday not in weekday_values:
+            saved_weekday = 0
+        url_check_weekday = st.selectbox(
+            t("strm_url_check_weekday"),
+            weekday_values,
+            index=saved_weekday,
+            format_func=lambda day: t(f"strm_weekday_{day}"),
+            help=t("strm_url_check_time_help"),
+        )
+        col_url_h, col_url_m = st.columns(2)
+        with col_url_h:
+            url_check_hour = st.number_input(
+                t("strm_url_check_hour"),
+                min_value=0,
+                max_value=23,
+                value=int(saved.get("url_check_hour", 6)),
+                help=t("strm_url_check_time_help"),
+            )
+        with col_url_m:
+            url_check_minute = st.number_input(
+                t("strm_url_check_minute"),
+                min_value=0,
+                max_value=59,
+                value=int(saved.get("url_check_minute", 0)),
+            )
+        url_check_on_manual = st.checkbox(
+            t("strm_url_check_on_manual"),
+            value=bool(saved.get("url_check_on_manual", False)),
+            help=t("strm_url_check_on_manual_help"),
+        )
+
         st.markdown(f"**{t('strm_filter_section')}**")
         exclude_adult = st.checkbox(
             t("strm_exclude_adult"),
@@ -537,6 +598,11 @@ def render_strm_sync_section(host: str, user: str, pw: str) -> None:
         "schedule_interval_hours": float(schedule_interval_hours),
         "schedule_hour": int(schedule_hour),
         "schedule_minute": int(schedule_minute),
+        "url_check_mode": url_check_mode,
+        "url_check_weekday": int(url_check_weekday),
+        "url_check_hour": int(url_check_hour),
+        "url_check_minute": int(url_check_minute),
+        "url_check_on_manual": bool(url_check_on_manual),
     }
 
     if submitted:
@@ -553,7 +619,7 @@ def render_strm_sync_section(host: str, user: str, pw: str) -> None:
             st.warning(t("strm_nothing_selected"))
         elif is_strm_sync_running():
             st.warning(t("strm_already_running"))
-        elif start_strm_sync(host, user, pw, config):
+        elif start_strm_sync(host, user, pw, _sync_config_for_run(config, manual=True)):
             if config.get("schedule_enabled"):
                 reschedule_from_config(config, from_now=False)
             st.success(t("strm_sync_started"))
@@ -719,6 +785,14 @@ def render_strm_sync_section(host: str, user: str, pw: str) -> None:
                 st.caption(t("strm_schedule_last", time=last_sched))
             elif not next_run:
                 st.caption(t("strm_schedule_pending"))
+
+        if str(schedule_cfg.get("url_check_mode") or "") == "weekly":
+            url_next = status.get("url_check_next_run") or ""
+            url_last = status.get("url_check_last_run") or ""
+            if url_next:
+                st.caption(t("strm_url_check_next", time=url_next))
+            if url_last:
+                st.caption(t("strm_url_check_last", time=url_last))
 
         if last_sync:
             st.caption(t("strm_last_sync", time=last_sync))

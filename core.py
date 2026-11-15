@@ -26,7 +26,19 @@ DOWNLOAD_CONFIG = {
 SERIES_DOWNLOAD_PATHS = (DOWNLOAD_TV_PATH,)
 DEFAULT_SERIES_DEST = DOWNLOAD_TV_PATH
 
-DOWNLOAD_PROGRESS_RE = re.compile(r"\[download\]\s+([\d.]+)%")
+# Same identity the Xtream API already uses. Browser headers (a Chrome
+# User-Agent, Accept: text/html, Sec-Fetch-Mode: navigate) make many panels
+# answer 403, which yt-dlp then reports as "Unable to download webpage".
+XTREAM_HTTP_USER_AGENT = "Xtream-VOD-Downloader/1.0"
+_UPDATE_WARNING_SNIPPETS = (
+    "older than 90 days",
+    "always use the latest version",
+    "to suppress this warning",
+    "you installed yt-dlp with pip",
+    "use that to update",
+    "yt-dlp --update",
+    "yt-dlp -u",
+)
 XTREAM_SERIES_EPISODE_URL_RE = re.compile(
     r"/series/[^/]+/[^/]+/(\d+)\.(\w+)/?\s*$", re.IGNORECASE
 )
@@ -2830,6 +2842,11 @@ def default_strm_sync_config() -> dict:
         "schedule_interval_hours": 24,
         "schedule_hour": 3,
         "schedule_minute": 0,
+        "url_check_mode": "weekly",
+        "url_check_weekday": 0,
+        "url_check_hour": 6,
+        "url_check_minute": 0,
+        "url_check_on_manual": False,
         "audit_new_movies_on_sync": True,
         "push_new_movies_to_jellyfin": True,
         "jellyfin_movies_root": "/media/movies",
@@ -2899,6 +2916,21 @@ def load_strm_sync_config() -> dict:
         merged["schedule_minute"] = max(0, min(59, int(merged.get("schedule_minute", 0))))
     except (TypeError, ValueError):
         merged["schedule_minute"] = 0
+    url_mode = str(merged.get("url_check_mode") or "weekly")
+    merged["url_check_mode"] = url_mode if url_mode in {"off", "weekly", "every_sync"} else "weekly"
+    try:
+        merged["url_check_weekday"] = max(0, min(6, int(merged.get("url_check_weekday", 0))))
+    except (TypeError, ValueError):
+        merged["url_check_weekday"] = 0
+    try:
+        merged["url_check_hour"] = max(0, min(23, int(merged.get("url_check_hour", 6))))
+    except (TypeError, ValueError):
+        merged["url_check_hour"] = 6
+    try:
+        merged["url_check_minute"] = max(0, min(59, int(merged.get("url_check_minute", 0))))
+    except (TypeError, ValueError):
+        merged["url_check_minute"] = 0
+    merged["url_check_on_manual"] = bool(merged.get("url_check_on_manual", False))
     return merged
 
 
@@ -2938,6 +2970,8 @@ def default_strm_sync_status() -> dict:
         "tmdb_cache_hits": 0,
         "schedule_last_run": "",
         "schedule_next_run": "",
+        "url_check_last_run": "",
+        "url_check_next_run": "",
         "last_error": "",
         "last_sync": "",
         "movies_elapsed_sec": 0.0,
@@ -3097,7 +3131,7 @@ def request_xtream_api(
     url = f"{host.rstrip('/')}/player_api.php"
     headers = {
         "Accept-Encoding": "identity",
-        "User-Agent": "Xtream-VOD-Downloader/1.0",
+        "User-Agent": XTREAM_HTTP_USER_AGENT,
         "Connection": "close",
     }
     last_exc = None
@@ -3538,6 +3572,68 @@ def download_already_complete(output: str, output_path: str) -> bool:
     return "http error 416" in blob or "requested range not satisfiable" in blob
 
 
+def ytdlp_output_without_update_warning(lines: list[str]) -> str:
+    """Drop yt-dlp's "older than 90 days" notice from a captured error."""
+    kept: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        for part in str(line).splitlines() or [""]:
+            low = part.lower()
+            if any(snippet in low for snippet in _UPDATE_WARNING_SNIPPETS):
+                continue
+            stripped = part.strip()
+            if stripped and stripped not in seen:
+                seen.add(stripped)
+                kept.append(stripped)
+    return "\n".join(kept[-20:]).strip()
+
+
+class _YtDlpLog:
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def debug(self, msg: str) -> None:
+        return None
+
+    def info(self, msg: str) -> None:
+        return None
+
+    def warning(self, msg: str) -> None:
+        self.lines.append(str(msg))
+
+    def error(self, msg: str) -> None:
+        self.lines.append(str(msg))
+
+
+def _xtream_download_headers() -> dict[str, str]:
+    return {
+        "User-Agent": XTREAM_HTTP_USER_AGENT,
+        "Accept": "*/*",
+        "Accept-Encoding": "identity",
+    }
+
+
+def _use_xtream_headers(ydl) -> None:
+    """Replace yt-dlp's merged browser headers with the app identity.
+
+    ``YoutubeDL`` copies ``Sec-Fetch-Mode: navigate`` and a Chrome User-Agent
+    into ``http_headers`` at init. Assigning a new mapping after init drops
+    those, including headers added by a newer yt-dlp.
+    """
+    from yt_dlp.utils.networking import HTTPHeaderDict
+
+    ydl.params["http_headers"] = HTTPHeaderDict(_xtream_download_headers())
+
+
+def _download_progress_text(prefix: str, downloaded: int, total: int) -> tuple[float, str]:
+    if total > 0:
+        frac = min(max(downloaded / total, 0.0), 1.0)
+        return frac, f"{prefix}{frac * 100:.1f}%"
+    if downloaded > 0:
+        return 0.0, f"{prefix}{human_size(downloaded)}"
+    return 0.0, f"{prefix}0%"
+
+
 def run_ytdlp(
     url: str,
     output_path: str,
@@ -3549,59 +3645,62 @@ def run_ytdlp(
     strm_path: str | None = None,
     delete_strm_on_success: bool = True,
 ) -> bool:
-    cmd = [
-        "yt-dlp",
-        url,
-        "-o",
-        output_path,
-        "--fixup",
-        "detect_or_warn",
-        "--newline",
-        "--progress",
-        # Keep bytes in ``<output>.part`` until yt-dlp exits successfully and
-        # renames to the final path. The library only sees a finished episode.
-    ]
-    if resume or growing_download_bytes(output_path) > 0:
-        cmd.append("--continue")
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
+    """Download an Xtream media URL.
 
-    last_pct = 0.0
-    output_lines = []
+    yt-dlp's default headers look like a browser navigation. Panels reply 403
+    and the UI shows that next to the "version older than 90 days" warning.
+    Requests here use the app User-Agent, and the age check stays off because
+    the image pins yt-dlp at build time.
+    """
+    from yt_dlp import YoutubeDL
+    from yt_dlp.utils import DownloadError
+
     prefix = f"{label} — " if label else ""
+    log = _YtDlpLog()
+    # Bytes stay in ``<output>.part`` until yt-dlp closes the file. The
+    # library only sees a finished episode.
+    params = {
+        "outtmpl": output_path,
+        "fixup": "detect_or_warn",
+        "noprogress": True,
+        "quiet": True,
+        "no_warnings": True,
+        "warn_when_outdated": False,
+        "noplaylist": True,
+        "continuedl": bool(resume or growing_download_bytes(output_path) > 0),
+        "http_headers": _xtream_download_headers(),
+        "logger": log,
+    }
 
-    assert proc.stdout is not None
-    for line in proc.stdout:
+    def _on_progress(status: dict) -> None:
         if should_cancel and should_cancel():
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
             raise DownloadCancelled("download interrotto per riproduzione attiva")
+        if progress_callback is None:
+            return
+        state = status.get("status")
+        if state != "downloading":
+            return
+        downloaded = int(status.get("downloaded_bytes") or 0)
+        total = int(status.get("total_bytes") or status.get("total_bytes_estimate") or 0)
+        frac, text = _download_progress_text(prefix, downloaded, total)
+        progress_callback(frac, text)
 
-        line = line.rstrip()
-        if line:
-            output_lines.append(line)
-        match = DOWNLOAD_PROGRESS_RE.search(line)
-        if match:
-            last_pct = float(match.group(1))
-            if progress_callback is not None:
-                progress_callback(min(last_pct / 100.0, 1.0), f"{prefix}{last_pct:.1f}%")
+    params["progress_hooks"] = [_on_progress]
 
     try:
-        proc.wait()
-        if proc.returncode != 0:
-            joined = "\n".join(output_lines[-20:]) or "Download fallito"
-            if download_already_complete(joined, output_path):
-                pass
-            else:
-                raise RuntimeError(joined)
+        with YoutubeDL(params) as ydl:
+            _use_xtream_headers(ydl)
+            if should_cancel and should_cancel():
+                raise DownloadCancelled("download interrotto per riproduzione attiva")
+            ydl.download([url])
+    except DownloadCancelled:
+        raise
+    except DownloadError as exc:
+        message = ytdlp_output_without_update_warning(
+            [*log.lines, str(exc)]
+        ) or "Download fallito"
+        if not download_already_complete(message, output_path):
+            raise RuntimeError(message) from exc
     finally:
         if output_path and os.path.exists(output_path):
             finalize_download_path(output_path)
