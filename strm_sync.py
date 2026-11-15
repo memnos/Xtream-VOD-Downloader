@@ -47,7 +47,15 @@ from core import (
     title_matches_terms,
     write_strm,
 )
-from stream_proxy import resolve_episode_play_url, resolve_movie_play_url
+from stream_proxy import (
+    get_movie_proxy_entry,
+    is_stream_proxy_url,
+    movie_proxy_key,
+    resolve_episode_play_url,
+    resolve_movie_play_url,
+    stream_proxy_enabled,
+    stream_proxy_host,
+)
 from tmdb import TmdbClient, clean_title
 
 _sync_lock = threading.RLock()
@@ -64,6 +72,15 @@ M3U_SERIES_URL_RE = re.compile(
     r"/series/[^/]+/[^/]+/(\d+)\.([A-Za-z0-9]+)(?:[?#].*)?$",
     re.IGNORECASE,
 )
+# Same identity the Xtream API client sends. Browser headers make some panels
+# answer 403 to a plain media GET.
+_STREAM_CHECK_USER_AGENT = "Xtream-VOD-Downloader/1.0"
+_DEAD_STREAM_STATUSES = frozenset({401, 403, 404, 410})
+_STREAM_ID_IN_URL_RE = re.compile(
+    r"/(?:movie|series)/[^/]+/[^/]+/(\d+)\.[A-Za-z0-9]+",
+    re.IGNORECASE,
+)
+
 EPISODE_PATTERNS = (
     re.compile(r"(.+?)\b[Ss](\d{1,2})\s*[Ee]\s*(\d{1,3})\b"),
     re.compile(r"(.+?)\b(\d{1,2})\s*x\s*(\d{1,3})\b", re.IGNORECASE),
@@ -372,6 +389,86 @@ def _skip_strm_when_local_exists(strm_path: str) -> str | None:
     return "skipped"
 
 
+def stream_id_from_media_url(url: str) -> str:
+    """Xtream movie/series id embedded in a direct play URL, or ''."""
+    match = _STREAM_ID_IN_URL_RE.search(url or "")
+    return match.group(1) if match else ""
+
+
+def stream_url_explicitly_rejected(url: str, *, timeout: tuple[float, float] = (4.0, 8.0)) -> bool:
+    """True only when the panel answers 401, 403, 404 or 410.
+
+    Timeouts, connection errors and 5xx are not rejections: a slow or briefly
+    down panel must not drop a library entry that may still play.
+    """
+    target = (url or "").strip()
+    if not target:
+        return False
+    try:
+        response = requests.get(
+            target,
+            headers={
+                "User-Agent": _STREAM_CHECK_USER_AGENT,
+                "Accept": "*/*",
+                "Accept-Encoding": "identity",
+            },
+            timeout=timeout,
+            stream=True,
+            allow_redirects=True,
+        )
+    except requests.RequestException:
+        return False
+    try:
+        return int(response.status_code) in _DEAD_STREAM_STATUSES
+    finally:
+        response.close()
+
+
+def _strm_targets_stream(strm_path: str, stream_id: str, remote_url: str) -> bool:
+    """True when this .strm (or its proxy registry entry) already points at stream_id."""
+    sid = str(stream_id or "").strip()
+    if not sid or not strm_path or not os.path.isfile(strm_path):
+        return False
+    existing = (read_strm_url(strm_path) or "").strip()
+    remote = (remote_url or "").strip()
+    if existing and remote and existing == remote:
+        return True
+    if stream_id_from_media_url(existing) == sid:
+        return True
+    if not is_stream_proxy_url(existing):
+        return False
+    folder = movie_folder_from_strm_path(strm_path) or os.path.basename(
+        os.path.dirname(strm_path)
+    )
+    if not folder:
+        return False
+    entry = get_movie_proxy_entry(movie_proxy_key(folder)) or {}
+    registered = str(entry.get("remote_url") or "").strip()
+    if remote and registered == remote:
+        return True
+    return stream_id_from_media_url(registered) == sid
+
+
+def _proxy_play_url_stable(existing_url: str, config: dict) -> bool:
+    """True when a rewrite would keep the same /p/movie/ text and only retarget the registry."""
+    if not is_stream_proxy_url(existing_url):
+        return False
+    return bool(stream_proxy_enabled(config) and stream_proxy_host(config))
+
+
+def settle_unavailable_movie(strm_path: str | None, *, remove_missing: bool) -> str:
+    """Delete a movie .strm whose catalog URL is dead and no alternate played.
+
+    Returns 'removed', 'kept', or 'absent'. Removal follows the same switch as
+    catalog cleanup ('Rimuovi .strm non più nel catalogo').
+    """
+    if not strm_path or not os.path.isfile(strm_path):
+        return "absent"
+    if remove_missing and _remove_strm_and_sidecars(strm_path):
+        return "removed"
+    return "kept"
+
+
 def _sync_movie_item(
     item: dict,
     host: str,
@@ -384,7 +481,12 @@ def _sync_movie_item(
     config: dict,
     probe_on_write: bool = False,
 ) -> tuple[str, str | None]:
-    """Returns (status, strm_path). status: created/updated/skipped/excluded/unmatched/probe_failed."""
+    """Returns (status, strm_path).
+
+    status: created/updated/skipped/excluded/unmatched/probe_failed/rejected.
+    'rejected' means the existing .strm already points at this stream and the
+    panel answered 401/403/404/410. The proxy registry is left unchanged.
+    """
     name = str(item.get("name") or "").strip()
     stream_id = item.get("stream_id")
     if not name or stream_id is None:
@@ -404,6 +506,34 @@ def _sync_movie_item(
         or os.path.basename(os.path.dirname(strm_path))
         or name
     )
+    file_exists = os.path.isfile(strm_path)
+    existing_url = (read_strm_url(strm_path) or "") if file_exists else ""
+    targeted = file_exists and _strm_targets_stream(strm_path, str(stream_id), remote_url)
+    proxy_stable = _proxy_play_url_stable(existing_url, auto_cfg)
+
+    # Check liveness before resolve_movie_play_url: that call registers the
+    # remote, and a stable proxy URL would then look unchanged.
+    if file_exists and update_existing and probe_on_write and targeted:
+        if stream_url_explicitly_rejected(remote_url):
+            return "rejected", strm_path
+    if (
+        file_exists
+        and update_existing
+        and probe_on_write
+        and proxy_stable
+        and not targeted
+    ):
+        if stream_url_explicitly_rejected(remote_url):
+            # No registry remote means this proxy .strm has nothing else to play.
+            # A 403 on the catalog stream is the URL playback would be pointed at.
+            entry = get_movie_proxy_entry(movie_proxy_key(folder_name)) or {}
+            if not str(entry.get("remote_url") or "").strip():
+                return "rejected", strm_path
+            return "probe_failed", strm_path
+        media = probe_stream_media_info(remote_url, timeout=45)
+        if media is None or float(media.get("duration") or 0) <= 0:
+            return "probe_failed", strm_path
+
     url = resolve_movie_play_url(
         folder_name=folder_name,
         remote_url=remote_url,
@@ -416,9 +546,12 @@ def _sync_movie_item(
     if local_action:
         return local_action, strm_path
 
-    if os.path.isfile(strm_path):
-        existing_url = read_strm_url(strm_path)
+    if file_exists:
         if existing_url == url:
+            # Same proxy text after a verified retarget: the file is unchanged
+            # but playback now follows the new Xtream stream.
+            if update_existing and probe_on_write and proxy_stable and not targeted:
+                return "updated", strm_path
             return "skipped", strm_path
         if not update_existing:
             return "skipped", strm_path
@@ -458,7 +591,9 @@ def _sync_movie_version_group(
 
     New versions (not discarded) are probed; failures are discarded and the next
     alternate is tried. Existing working STRMs are left alone when update_existing
-    is False.
+    is False. When update_existing is on and the URL already in the file is
+    explicitly rejected, later versions are tried; if none play, the result is
+    'unavailable' so the caller can remove the file.
     """
     from discarded_movie_streams import (
         iter_alternate_catalog_versions,
@@ -486,6 +621,7 @@ def _sync_movie_version_group(
                 pass
 
     saw_unmatched = False
+    existing_rejected = False
     last_path: str | None = None
 
     for item in candidates:
@@ -525,14 +661,15 @@ def _sync_movie_version_group(
             config=config,
             probe_on_write=True,
         )
-        if result == "probe_failed":
+        if result in {"probe_failed", "rejected"}:
+            reason = "http_rejected" if result == "rejected" else "probe_failed_sync"
             mark_movie_stream_discarded(
                 stream_id=item.get("stream_id") or "",
                 ext=str(item.get("container_extension") or "mp4"),
                 size=item_file_size_bytes(item),
                 name=str(item.get("name") or ""),
                 title=str(item.get("name") or ""),
-                reason="probe_failed_sync",
+                reason=reason,
                 url=build_movie_stream_url(
                     host,
                     user,
@@ -551,15 +688,25 @@ def _sync_movie_version_group(
                             f"{sid}|{str(item.get('container_extension') or 'mp4').lstrip('.').lower()}|"
                             f"{item_file_size_bytes(item)}"
                         ),
-                        "reason": "probe_failed_sync",
+                        "reason": reason,
                     }
+            if result == "rejected":
+                existing_rejected = True
             continue
-        if result in {"created", "updated", "removed", "skipped", "excluded"}:
+        if result in {"created", "updated", "removed", "excluded"}:
+            return result, path
+        if result == "skipped":
+            # A rejected URL is still in the file. Keep looking for a version
+            # that can replace it instead of stopping on a no-op candidate.
+            if existing_rejected:
+                continue
             return result, path
         if result == "unmatched":
             saw_unmatched = True
             continue
 
+    if existing_rejected and last_path and os.path.isfile(last_path):
+        return "unavailable", last_path
     if saw_unmatched:
         return "unmatched", last_path
     return "skipped", last_path
@@ -1227,6 +1374,21 @@ def run_strm_sync(host: str, user: str, password: str, config: dict | None = Non
                     # An unexpected error on a single movie must not abort the scan.
                     status["movies_errors"] += 1
                     continue
+                if result == "unavailable":
+                    action = settle_unavailable_movie(
+                        strm_path, remove_missing=remove_missing
+                    )
+                    if action == "removed":
+                        status["movies_removed"] += 1
+                        _append_log(
+                            status,
+                            f"Removed dead movie STRM: {os.path.basename(strm_path or '')}",
+                        )
+                    else:
+                        if strm_path and os.path.isfile(strm_path):
+                            expected_movie_paths.add(os.path.realpath(strm_path))
+                        status["movies_skipped"] += 1
+                    continue
                 if strm_path and os.path.isfile(strm_path):
                     expected_movie_paths.add(os.path.realpath(strm_path))
                 if result == "created":
@@ -1464,9 +1626,11 @@ def run_strm_sync(host: str, user: str, password: str, config: dict | None = Non
                     cleanup_min_ratio,
                 )
                 if allowed:
-                    status["movies_removed"] = _remove_orphan_strm_files(
-                        movies_output,
-                        expected_movie_paths,
+                    status["movies_removed"] = int(status.get("movies_removed") or 0) + (
+                        _remove_orphan_strm_files(
+                            movies_output,
+                            expected_movie_paths,
+                        )
                     )
                     status["dirs_removed"] = int(status.get("dirs_removed") or 0) + _prune_dirs_without_strm(
                         movies_output
