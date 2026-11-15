@@ -587,6 +587,33 @@ class SiloClient:
         """Silo picks up new files on its own scan; nothing to push."""
         del updates
 
+    def list_libraries(self) -> list[dict]:
+        data = self._request(
+            "GET",
+            "/api/v1/libraries/",
+            params=None,
+            json_body=None,
+            include_profile=False,
+        )
+        rows = data if isinstance(data, list) else []
+        if isinstance(data, dict):
+            nested = data.get("items") or data.get("libraries") or []
+            rows = nested if isinstance(nested, list) else []
+        return [row for row in rows if isinstance(row, dict)]
+
+    def request_scan(self, path: str) -> None:
+        """Ask Silo to scan one library file or folder (POST /api/v1/scan)."""
+        target = (path or "").strip()
+        if not target:
+            raise ValueError("path is required")
+        self._request(
+            "POST",
+            "/api/v1/scan",
+            params=None,
+            json_body={"path": target},
+            include_profile=False,
+        )
+
     def find_item_by_path(self, path: str) -> dict | None:
         del path
         return None

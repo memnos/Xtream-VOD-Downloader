@@ -1257,14 +1257,22 @@ def local_download_exists_for_strm(strm_path: str) -> bool:
     return bool(find_local_files_for_strm(strm_path))
 
 
-def find_strm_files_for_local(local_path: str) -> list[str]:
-    """Find .strm library files replaced by a local download."""
+def find_strm_files_for_local(
+    local_path: str, *, allow_unmarked: bool = False
+) -> list[str]:
+    """Find .strm library files replaced by a local video.
+
+    Episode files need the ``[LOCAL]`` marker unless ``allow_unmarked`` is set.
+    Mediarium and other library imports keep the release filename.
+    """
     local_path = os.path.realpath(local_path)
     found: list[str] = []
     episode_numbers = parse_episode_numbers_from_path(local_path)
     if episode_numbers is not None:
-        # Episode path: only treat explicit [LOCAL] downloads as overrides.
-        if LOCAL_DOWNLOAD_MARKER not in os.path.basename(local_path):
+        if (
+            not allow_unmarked
+            and LOCAL_DOWNLOAD_MARKER not in os.path.basename(local_path)
+        ):
             return []
         season, episode = episode_numbers
         series_folder = series_folder_from_media_path(local_path) or ""
@@ -1478,12 +1486,15 @@ def delete_strm_after_local_download(
     *,
     strm_path: str | None = None,
     strm_url: str | None = None,
+    allow_unmarked: bool = False,
 ) -> list[str]:
     """Delete .strm files (and sidecars) superseded by a completed local download."""
     candidates: list[str] = []
     if strm_path:
         candidates.append(os.path.realpath(strm_path))
-    candidates.extend(find_strm_files_for_local(local_path))
+    candidates.extend(
+        find_strm_files_for_local(local_path, allow_unmarked=allow_unmarked)
+    )
 
     deleted: list[str] = []
     seen: set[str] = set()
@@ -2219,10 +2230,14 @@ def finalize_after_local_download(
     strm_path: str | None = None,
     strm_url: str | None = None,
     notify: bool = True,
+    allow_unmarked: bool = False,
 ) -> dict:
     """Post-download cleanup: remove superseded .strm, align NFOs, notify JF/Emby."""
     deleted = delete_strm_after_local_download(
-        local_path, strm_path=strm_path, strm_url=strm_url
+        local_path,
+        strm_path=strm_path,
+        strm_url=strm_url,
+        allow_unmarked=allow_unmarked,
     )
     nfo = align_episode_nfo_after_local_download(local_path)
     notify_notes: list[str] = []
