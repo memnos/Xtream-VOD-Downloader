@@ -2830,6 +2830,11 @@ def default_strm_sync_config() -> dict:
         "schedule_interval_hours": 24,
         "schedule_hour": 3,
         "schedule_minute": 0,
+        "url_check_mode": "weekly",
+        "url_check_weekday": 0,
+        "url_check_hour": 6,
+        "url_check_minute": 0,
+        "url_check_on_manual": False,
         "audit_new_movies_on_sync": True,
         "push_new_movies_to_jellyfin": True,
         "jellyfin_movies_root": "/media/movies",
@@ -2899,6 +2904,21 @@ def load_strm_sync_config() -> dict:
         merged["schedule_minute"] = max(0, min(59, int(merged.get("schedule_minute", 0))))
     except (TypeError, ValueError):
         merged["schedule_minute"] = 0
+    url_mode = str(merged.get("url_check_mode") or "weekly")
+    merged["url_check_mode"] = url_mode if url_mode in {"off", "weekly", "every_sync"} else "weekly"
+    try:
+        merged["url_check_weekday"] = max(0, min(6, int(merged.get("url_check_weekday", 0))))
+    except (TypeError, ValueError):
+        merged["url_check_weekday"] = 0
+    try:
+        merged["url_check_hour"] = max(0, min(23, int(merged.get("url_check_hour", 6))))
+    except (TypeError, ValueError):
+        merged["url_check_hour"] = 6
+    try:
+        merged["url_check_minute"] = max(0, min(59, int(merged.get("url_check_minute", 0))))
+    except (TypeError, ValueError):
+        merged["url_check_minute"] = 0
+    merged["url_check_on_manual"] = bool(merged.get("url_check_on_manual", False))
     return merged
 
 
@@ -2938,6 +2958,8 @@ def default_strm_sync_status() -> dict:
         "tmdb_cache_hits": 0,
         "schedule_last_run": "",
         "schedule_next_run": "",
+        "url_check_last_run": "",
+        "url_check_next_run": "",
         "last_error": "",
         "last_sync": "",
         "movies_elapsed_sec": 0.0,

@@ -480,6 +480,7 @@ def _sync_movie_item(
     tmdb_client: TmdbClient | None,
     config: dict,
     probe_on_write: bool = False,
+    verify_existing_urls: bool = False,
 ) -> tuple[str, str | None]:
     """Returns (status, strm_path).
 
@@ -513,11 +514,20 @@ def _sync_movie_item(
 
     # Check liveness before resolve_movie_play_url: that call registers the
     # remote, and a stable proxy URL would then look unchanged.
-    if file_exists and update_existing and probe_on_write and targeted:
+    # The GET runs only on the weekly URL check (or when that check is forced):
+    # opening every movie URL on the daily scan takes hours.
+    if (
+        verify_existing_urls
+        and file_exists
+        and update_existing
+        and probe_on_write
+        and targeted
+    ):
         if stream_url_explicitly_rejected(remote_url):
             return "rejected", strm_path
     if (
-        file_exists
+        verify_existing_urls
+        and file_exists
         and update_existing
         and probe_on_write
         and proxy_stable
@@ -550,7 +560,13 @@ def _sync_movie_item(
         if existing_url == url:
             # Same proxy text after a verified retarget: the file is unchanged
             # but playback now follows the new Xtream stream.
-            if update_existing and probe_on_write and proxy_stable and not targeted:
+            if (
+                verify_existing_urls
+                and update_existing
+                and probe_on_write
+                and proxy_stable
+                and not targeted
+            ):
                 return "updated", strm_path
             return "skipped", strm_path
         if not update_existing:
@@ -586,6 +602,7 @@ def _sync_movie_version_group(
     config: dict,
     allow_4k: bool,
     discarded_store: dict | None = None,
+    verify_existing_urls: bool = False,
 ) -> tuple[str, str | None]:
     """Try catalog versions in quality order; probe before create/update.
 
@@ -660,6 +677,7 @@ def _sync_movie_version_group(
             tmdb_client=tmdb_client,
             config=config,
             probe_on_write=True,
+            verify_existing_urls=verify_existing_urls,
         )
         if result in {"probe_failed", "rejected"}:
             reason = "http_rejected" if result == "rejected" else "probe_failed_sync"
@@ -1241,6 +1259,8 @@ def run_strm_sync(host: str, user: str, password: str, config: dict | None = Non
     status["running"] = True
     status["schedule_last_run"] = str(previous.get("schedule_last_run") or "")
     status["schedule_next_run"] = str(previous.get("schedule_next_run") or "")
+    status["url_check_last_run"] = str(previous.get("url_check_last_run") or "")
+    status["url_check_next_run"] = str(previous.get("url_check_next_run") or "")
     if not status["schedule_next_run"] and config.get("schedule_enabled"):
         from strm_scheduler import compute_next_scheduled_run, format_schedule_time
 
@@ -1268,6 +1288,7 @@ def run_strm_sync(host: str, user: str, password: str, config: dict | None = Non
         allow_4k = bool(config.get("allow_4k", False))
         update_existing = bool(config.get("update_existing", True))
         remove_missing = bool(config.get("remove_missing", False))
+        verify_existing_urls = bool(config.get("verify_existing_urls"))
         cleanup_min_ratio = max(0.05, min(1.0, float(config.get("cleanup_min_ratio", 0.5))))
         exclude_terms = list(config.get("exclude_terms", []))
         exclude_adult = bool(config.get("exclude_adult", True))
@@ -1287,6 +1308,11 @@ def run_strm_sync(host: str, user: str, password: str, config: dict | None = Non
             movies_started = time.perf_counter()
             status["phase"] = "movies"
             status["progress_text"] = "Loading movie catalog..."
+            if verify_existing_urls:
+                _append_log(
+                    status,
+                    "Movie URL check on: each existing movie URL is opened once",
+                )
             _append_log(status, status["progress_text"])
             _save_status(status)
             try:
@@ -1369,6 +1395,7 @@ def run_strm_sync(host: str, user: str, password: str, config: dict | None = Non
                         config=config,
                         allow_4k=allow_4k,
                         discarded_store=discarded_store,
+                        verify_existing_urls=verify_existing_urls,
                     )
                 except Exception:
                     # An unexpected error on a single movie must not abort the scan.

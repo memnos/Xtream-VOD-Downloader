@@ -174,6 +174,42 @@ class SyncAlternateProbeTests(unittest.TestCase):
         rejected_mock.assert_not_called()
         self.assertIn("99.mp4", open(strm_path).read())
 
+    def test_daily_sync_does_not_open_existing_urls(self):
+        strm_path = self._write_strm(
+            "Heart of the Beast 1080p",
+            "http://h/movie/u/p/519632.mkv",
+        )
+        with patch(
+            "strm_sync._resolve_movie_paths", return_value=(strm_path, "")
+        ), patch(
+            "strm_sync.stream_url_explicitly_rejected"
+        ) as rejected_mock, patch(
+            "strm_sync.probe_stream_media_info"
+        ) as probe_mock, patch(
+            "strm_sync.local_download_exists_for_strm", return_value=False
+        ), patch(
+            "strm_sync.load_auto_download_config",
+            return_value={"stream_proxy_enabled": False, "stream_proxy_download": False},
+        ):
+            result, _path = _sync_movie_version_group(
+                self._versions("519632"),
+                "http://h",
+                "u",
+                "p",
+                self.root,
+                update_existing=True,
+                verify_existing_urls=False,
+                tmdb_client=None,
+                config={},
+                allow_4k=True,
+                discarded_store=dms.load_discarded_streams(),
+            )
+        self.assertEqual(result, "skipped")
+        rejected_mock.assert_not_called()
+        probe_mock.assert_not_called()
+        with open(strm_path, encoding="utf-8") as handle:
+            self.assertIn("519632.mkv", handle.read())
+
     def _versions(self, first_id: str, second_id: str | None = None):
         versions = [
             {
@@ -232,6 +268,7 @@ class SyncAlternateProbeTests(unittest.TestCase):
                 "p",
                 self.root,
                 update_existing=True,
+                verify_existing_urls=True,
                 tmdb_client=None,
                 config={},
                 allow_4k=True,
@@ -269,6 +306,7 @@ class SyncAlternateProbeTests(unittest.TestCase):
                 "p",
                 self.root,
                 update_existing=True,
+                verify_existing_urls=True,
                 tmdb_client=None,
                 config={},
                 allow_4k=True,
@@ -299,6 +337,7 @@ class SyncAlternateProbeTests(unittest.TestCase):
                 "p",
                 self.root,
                 update_existing=True,
+                verify_existing_urls=True,
                 tmdb_client=None,
                 config={},
                 allow_4k=True,
@@ -361,6 +400,7 @@ class SyncAlternateProbeTests(unittest.TestCase):
                 "p",
                 self.root,
                 update_existing=True,
+                verify_existing_urls=True,
                 tmdb_client=None,
                 config={},
                 allow_4k=True,
@@ -399,6 +439,7 @@ class SyncAlternateProbeTests(unittest.TestCase):
                 "p",
                 self.root,
                 update_existing=True,
+                verify_existing_urls=True,
                 tmdb_client=None,
                 config={},
                 allow_4k=True,
