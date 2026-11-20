@@ -33,7 +33,7 @@ from ui_strm import render_strm_sync_section
 from ui_subtitles import render_subtitle_request_section
 from ui_theme import inject_theme, render_app_header
 
-APP_VERSION = "2.37.1"
+APP_VERSION = "2.38.0"
 
 SECTION_BY_MODE = {
     "manual": "download",
@@ -166,6 +166,32 @@ with st.sidebar.expander(t("sidebar_login"), expanded=login_expanded):
     if st.button(t("clear_creds")):
         clear_credentials()
         st.rerun()
+
+    st.caption(t("retarget_xtream_help"))
+    if st.button(t("retarget_xtream"), help=t("retarget_xtream_button_help")):
+        if not (host and user and pw):
+            st.error(t("retarget_xtream_missing"))
+        else:
+            from xtream_retarget import retarget_xtream_library
+
+            with st.spinner(t("retarget_xtream_running")):
+                retarget = retarget_xtream_library(host, user, pw, save_creds=True)
+            if not retarget.get("ok"):
+                errs = ", ".join(str(e) for e in (retarget.get("errors") or [])[:3])
+                st.error(t("retarget_xtream_failed", detail=errs or "unknown"))
+            else:
+                st.success(
+                    t(
+                        "retarget_xtream_done",
+                        strm=int(retarget.get("strm_updated") or 0),
+                        proxy=int(retarget.get("strm_proxy") or 0),
+                        registry=int(retarget.get("registry_movies") or 0)
+                        + int(retarget.get("registry_episodes") or 0),
+                        sidecar=int(retarget.get("sidecar_updated") or 0),
+                        auth=str(retarget.get("auth") or ""),
+                    )
+                )
+                st.info(t("retarget_xtream_no_silo"))
 
     if st.button(t("unlock_ui"), help=t("unlock_ui_help")):
         clear_pending_download()

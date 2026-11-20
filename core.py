@@ -2635,19 +2635,36 @@ def prepare_strm_dir(path: str) -> None:
         _apply_path_permissions(level, uid, gid)
 
 
-def write_strm(path: str, url: str) -> bool:
-    """Write a .strm file. Returns True if created/updated, False if unchanged."""
+def write_strm(path: str, url: str, *, preserve_mtime: bool = False) -> bool:
+    """Write a .strm file. Returns True if created/updated, False if unchanged.
+
+    preserve_mtime keeps the previous atime/mtime after a content rewrite so
+    media-server watchers do not treat the file as newly changed (used when
+    retargeting Xtream host/credentials without a Silo rescan).
+    """
     url = url.strip()
     if not url:
         return False
     existing = read_strm_url(path)
     if existing == url and os.path.isfile(path):
         return False
+    previous_times: tuple[float, float] | None = None
+    if preserve_mtime and os.path.isfile(path):
+        try:
+            stat = os.stat(path)
+            previous_times = (stat.st_atime, stat.st_mtime)
+        except OSError:
+            previous_times = None
     parent = os.path.dirname(path)
     prepare_strm_dir(parent)
     with open(path, "w", encoding="utf-8") as f:
         f.write(url + "\n")
     finalize_strm_path(path)
+    if previous_times is not None:
+        try:
+            os.utime(path, previous_times)
+        except OSError:
+            pass
     return True
 
 

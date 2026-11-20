@@ -251,6 +251,26 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "password": "Password",
         "remember_creds": "Remember credentials",
         "clear_creds": "🗑️ Clear saved credentials",
+        "retarget_xtream": "🔁 Retarget library URLs",
+        "retarget_xtream_help": (
+            "If only the Xtream link/credentials changed (same stream ids), "
+            "retarget existing .strm / proxy registry URLs — no full sync, no Silo rescan."
+        ),
+        "retarget_xtream_button_help": (
+            "Verify login, save credentials, rewrite movie/series play URLs in place. "
+            "Proxy .strm files keep their LAN URL; only the registry remote URL changes."
+        ),
+        "retarget_xtream_missing": "Enter host, username and password first.",
+        "retarget_xtream_running": "Verifying Xtream and rewriting URLs…",
+        "retarget_xtream_failed": "Retarget failed: {detail}",
+        "retarget_xtream_done": (
+            "Retarget done (auth {auth}): {strm} .strm updated, {proxy} already on proxy, "
+            "{registry} registry remotes, {sidecar} download sidecars."
+        ),
+        "retarget_xtream_no_silo": (
+            "Silo does not need a full library rescan — paths are unchanged. "
+            "Skip «Sync now» unless you also want new catalog titles."
+        ),
         "unlock_ui": "🔄 Unlock interface",
         "unlock_ui_help": "Clears pending downloads in this session",
         "mode_label": "Mode",
@@ -1106,6 +1126,26 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "password": "Password",
         "remember_creds": "Ricorda credenziali",
         "clear_creds": "🗑️ Elimina credenziali salvate",
+        "retarget_xtream": "🔁 Aggiorna URL libreria",
+        "retarget_xtream_help": (
+            "Se è cambiato solo il link/credenziali Xtream (stessi stream id), "
+            "riscrivi gli URL degli .strm / registry proxy — senza sync completo e senza rescan Silo."
+        ),
+        "retarget_xtream_button_help": (
+            "Verifica il login, salva le credenziali e riscrive gli URL di riproduzione. "
+            "Gli .strm sul proxy restano con l'URL LAN; cambia solo il remote nel registry."
+        ),
+        "retarget_xtream_missing": "Inserisci prima host, username e password.",
+        "retarget_xtream_running": "Verifica Xtream e riscrittura URL in corso…",
+        "retarget_xtream_failed": "Retarget fallito: {detail}",
+        "retarget_xtream_done": (
+            "Retarget completato (auth {auth}): {strm} .strm aggiornati, {proxy} già sul proxy, "
+            "{registry} remote nel registry, {sidecar} sidecar download."
+        ),
+        "retarget_xtream_no_silo": (
+            "Silo non deve rifare la scansione completa — i percorsi non cambiano. "
+            "Non serve «Sincronizza ora» salvo che tu voglia anche i titoli nuovi del catalogo."
+        ),
         "unlock_ui": "🔄 Sblocca interfaccia",
         "unlock_ui_help": "Cancella download in sospeso nella sessione",
         "mode_label": "Modalità",
