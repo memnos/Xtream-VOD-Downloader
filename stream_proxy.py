@@ -454,6 +454,66 @@ def flush_proxy_registry() -> None:
         _save_registry(_REGISTRY_CACHE)
 
 
+def retarget_proxy_registry_remote_urls(
+    host: str,
+    user: str,
+    password: str,
+    *,
+    only_from_host: str = "",
+) -> dict:
+    """Rewrite remote_url fields in the proxy registry to new Xtream credentials.
+
+    .strm files that already point at /p/movie/ or /p/episode/ stay unchanged, so
+    Silo does not see path or content churn.
+    """
+    from xtream_retarget import retarget_xtream_media_url
+
+    result = {"movies_updated": 0, "episodes_updated": 0, "errors": []}
+    host = (host or "").strip()
+    user = (user or "").strip()
+    password = (password or "").strip()
+    if not host or not user or not password:
+        result["errors"].append("missing_credentials")
+        return result
+    with _REGISTRY_LOCK:
+        data = _load_registry()
+        dirty = False
+        for bucket, counter in (
+            ("movies", "movies_updated"),
+            ("episodes", "episodes_updated"),
+        ):
+            entries = data.get(bucket)
+            if not isinstance(entries, dict):
+                continue
+            for key, entry in list(entries.items()):
+                if not isinstance(entry, dict):
+                    continue
+                current = str(entry.get("remote_url") or "").strip()
+                if not current:
+                    continue
+                try:
+                    new_url = retarget_xtream_media_url(
+                        current,
+                        host,
+                        user,
+                        password,
+                        only_from_host=only_from_host,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    result["errors"].append(f"{bucket}/{key}:{exc}")
+                    continue
+                if not new_url or new_url == current:
+                    continue
+                entry["remote_url"] = new_url
+                entry["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+                entries[key] = entry
+                result[counter] += 1
+                dirty = True
+        if dirty:
+            _save_registry(data)
+    return result
+
+
 def _registry_entry_unchanged(prev: dict | None, entry: dict, keys: tuple[str, ...]) -> bool:
     if not isinstance(prev, dict):
         return False
